@@ -19,72 +19,70 @@ import tempfile
 # ==========================================
 st.set_page_config(page_title="Aplikasi RHK PKH Pro", layout="wide")
 
-# --- KONFIGURASI USER & PASSWORD (EDIT DISINI) ---
-# Format: "Username": "Password"
-# Anda bisa menambah atau mengganti akun di sini
+# --- DAFTAR USER & PASSWORD (EDIT DISINI) ---
 DAFTAR_USER = {
     "admin": "admin123",
     "pendamping": "pkh2026",
     "user": "user"
 }
 
-# --- SISTEM KEAMANAN (LOGIN SEDERHANA) ---
+# --- SISTEM KEAMANAN (LOGIN) ---
 def check_password():
     """Mengembalikan True jika user berhasil login."""
     def password_entered():
-        # Cek apakah username ada di daftar dan password cocok
         if st.session_state["username"] in DAFTAR_USER and \
            st.session_state["password"] == DAFTAR_USER[st.session_state["username"]]:
             st.session_state["password_correct"] = True
-            # Hapus password dari session agar aman
             del st.session_state["password"]  
         else:
             st.session_state["password_correct"] = False
 
     if "password_correct" not in st.session_state:
-        # Tampilan Awal: Form Login
-        st.markdown("<h1 style='text-align: center;'>🔐 Login Area</h1>", unsafe_allow_html=True)
-        st.markdown("<p style='text-align: center;'>Silakan masukkan akun Pendamping PKH Anda</p>", unsafe_allow_html=True)
+        # TAMPILAN HALAMAN LOGIN
+        st.markdown("<br><br>", unsafe_allow_html=True)
+        st.markdown("<h1 style='text-align: center;'>🔐 LOGIN APLIKASI</h1>", unsafe_allow_html=True)
+        st.markdown("<p style='text-align: center;'>Silakan masuk untuk mengakses sistem RHK</p>", unsafe_allow_html=True)
         
-        col1, col2, col3 = st.columns([1,2,1])
-        with col2:
+        c1, c2, c3 = st.columns([1, 2, 1])
+        with c2:
             st.text_input("Username", key="username")
             st.text_input("Password", type="password", key="password", on_change=password_entered)
-            #st.warning("🔒 Default Admin: admin / admin123")
+            
+            # Info Login (Bisa dihapus jika sudah tidak butuh)
+            st.info("ℹ️ Akun Demo: admin / admin123") 
+            
         return False
     
     elif not st.session_state["password_correct"]:
-        # Jika Password Salah
-        st.markdown("<h1 style='text-align: center;'>🔐 Login Area</h1>", unsafe_allow_html=True)
-        col1, col2, col3 = st.columns([1,2,1])
-        with col2:
+        st.markdown("<h1 style='text-align: center;'>🔐 LOGIN APLIKASI</h1>", unsafe_allow_html=True)
+        c1, c2, c3 = st.columns([1, 2, 1])
+        with c2:
             st.text_input("Username", key="username")
             st.text_input("Password", type="password", key="password", on_change=password_entered)
             st.error("😕 Username atau Password Salah!")
         return False
     
     else:
-        # Jika Password Benar
         return True
 
 # --- JALANKAN APLIKASI HANYA JIKA LOGIN SUKSES ---
 if check_password():
 
     # ==========================================
-    # MULAI KODE APLIKASI UTAMA DI SINI
+    # KODE APLIKASI UTAMA
     # ==========================================
 
-    # --- API KEY (Manual Input untuk Offline) ---
-    # Ganti tulisan di bawah dengan API Key Google AI Studio Anda
-    GOOGLE_API_KEY = "MASUKKAN_KEY_GOOGLE_ANDA_DISINI"
+    # --- API KEY (Manual Input) ---
+    GOOGLE_API_KEY = "AIzaSyA7bPifjqpei7CSSZuckB62oIN0OYlWY4Y"
 
     try:
         genai.configure(api_key=GOOGLE_API_KEY)
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-flash-latest')
     except: pass
 
-    # --- TOMBOL LOGOUT ---
+    # --- TOMBOL LOGOUT (SIDEBAR) ---
     with st.sidebar:
+        st.write(f"👤 Login sebagai: **{st.session_state['username']}**")
         if st.button("🔒 Logout"):
             del st.session_state["password_correct"]
             st.rerun()
@@ -140,7 +138,7 @@ if check_password():
     # 3. DATABASE & TOOLS
     # ==========================================
     def init_db():
-        conn = sqlite3.connect('riwayat_v37_nosecrets.db')
+        conn = sqlite3.connect('riwayat_v38_final.db')
         c = conn.cursor()
         c.execute('''CREATE TABLE IF NOT EXISTS riwayat (id INTEGER PRIMARY KEY, tgl TEXT, rhk TEXT, judul TEXT, lokasi TEXT)''')
         c.execute('''CREATE TABLE IF NOT EXISTS user_settings (
@@ -153,7 +151,7 @@ if check_password():
         conn.commit(); conn.close()
 
     def get_user_settings():
-        conn = sqlite3.connect('riwayat_v37_nosecrets.db')
+        conn = sqlite3.connect('riwayat_v38_final.db')
         c = conn.cursor()
         c.execute('SELECT nama, nip, kpm, prov, kab, kec, kel FROM user_settings WHERE id=1')
         data = c.fetchone()
@@ -161,14 +159,14 @@ if check_password():
         return data
 
     def save_user_settings(nama, nip, kpm, prov, kab, kec, kel):
-        conn = sqlite3.connect('riwayat_v37_nosecrets.db')
+        conn = sqlite3.connect('riwayat_v38_final.db')
         c = conn.cursor()
         c.execute('''UPDATE user_settings SET nama=?, nip=?, kpm=?, prov=?, kab=?, kec=?, kel=? WHERE id=1''', (nama, nip, kpm, prov, kab, kec, kel))
         conn.commit(); conn.close()
 
     def simpan_riwayat(rhk, judul, lokasi):
         try:
-            conn = sqlite3.connect('riwayat_v37_nosecrets.db')
+            conn = sqlite3.connect('riwayat_v38_final.db')
             c = conn.cursor()
             tgl = datetime.now().strftime("%Y-%m-%d %H:%M")
             c.execute('INSERT INTO riwayat (tgl, rhk, judul, lokasi) VALUES (?, ?, ?, ?)', (tgl, rhk, judul, lokasi))
@@ -538,7 +536,6 @@ if check_password():
             st.sidebar.success("Profil Tersimpan!")
 
     def show_dashboard():
-        # CSS: HARD FREEZE HEADER
         st.markdown("""
             <style>
             div[data-testid="stVerticalBlock"] > div:first-child {
@@ -902,4 +899,3 @@ if check_password():
     render_sidebar()
     if st.session_state['page'] == 'home': show_dashboard()
     elif st.session_state['page'] == 'detail': show_detail_page()
-
