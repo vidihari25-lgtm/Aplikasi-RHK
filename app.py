@@ -26,43 +26,35 @@ DAFTAR_USER = {
     "user": "user"
 }
 
-# --- SISTEM KEAMANAN (LOGIN) ---
+# --- SISTEM KEAMANAN (LOGIN DENGAN TOMBOL) ---
 def check_password():
     """Mengembalikan True jika user berhasil login."""
-    def password_entered():
-        if st.session_state["username"] in DAFTAR_USER and \
-           st.session_state["password"] == DAFTAR_USER[st.session_state["username"]]:
-            st.session_state["password_correct"] = True
-            del st.session_state["password"]  
-        else:
-            st.session_state["password_correct"] = False
-
-    if "password_correct" not in st.session_state:
-        # TAMPILAN HALAMAN LOGIN
-        st.markdown("<br><br>", unsafe_allow_html=True)
-        st.markdown("<h1 style='text-align: center;'>🔐 LOGIN APLIKASI</h1>", unsafe_allow_html=True)
-        st.markdown("<p style='text-align: center;'>Silakan masuk untuk mengakses sistem RHK</p>", unsafe_allow_html=True)
-        
-        c1, c2, c3 = st.columns([1, 2, 1])
-        with c2:
-            st.text_input("Username", key="username")
-            st.text_input("Password", type="password", key="password", on_change=password_entered)
-            
-            # TULISAN DEMO SUDAH DIHAPUS DI SINI
-            
-        return False
     
-    elif not st.session_state["password_correct"]:
-        st.markdown("<h1 style='text-align: center;'>🔐 LOGIN APLIKASI</h1>", unsafe_allow_html=True)
-        c1, c2, c3 = st.columns([1, 2, 1])
-        with c2:
-            st.text_input("Username", key="username")
-            st.text_input("Password", type="password", key="password", on_change=password_entered)
-            st.error("😕 Username atau Password Salah!")
-        return False
-    
-    else:
+    # Cek apakah user sudah login sebelumnya
+    if st.session_state.get("password_correct", False):
         return True
+
+    # TAMPILAN HALAMAN LOGIN
+    st.markdown("<br><br>", unsafe_allow_html=True)
+    st.markdown("<h1 style='text-align: center;'>🔐 LOGIN APLIKASI</h1>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center;'>Silakan masukkan akun Pendamping PKH Anda</p>", unsafe_allow_html=True)
+    
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        # Input Username & Password
+        input_user = st.text_input("Username")
+        input_pass = st.text_input("Password", type="password")
+        
+        # TOMBOL LOGIN (Action Trigger)
+        if st.button("MASUK / LOGIN", type="primary", use_container_width=True):
+            if input_user in DAFTAR_USER and DAFTAR_USER[input_user] == input_pass:
+                st.session_state["password_correct"] = True
+                st.session_state["username"] = input_user # Simpan nama user
+                st.rerun() # Refresh halaman untuk masuk ke aplikasi
+            else:
+                st.error("😕 Username atau Password Salah!")
+                
+    return False
 
 # --- JALANKAN APLIKASI HANYA JIKA LOGIN SUKSES ---
 if check_password():
@@ -72,18 +64,20 @@ if check_password():
     # ==========================================
 
     # --- API KEY (Manual Input) ---
-    GOOGLE_API_KEY = "MASUKKAN_KEY_GOOGLE_ANDA_DISINI"
+    GOOGLE_API_KEY = "AIzaSyA7bPifjqpei7CSSZuckB62oIN0OYlWY4Y"
 
     try:
         genai.configure(api_key=GOOGLE_API_KEY)
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-flash-latest')
     except: pass
 
     # --- TOMBOL LOGOUT (SIDEBAR) ---
     with st.sidebar:
-        st.write(f"👤 Login sebagai: **{st.session_state['username']}**")
-        if st.button("🔒 Logout"):
-            del st.session_state["password_correct"]
+        st.write(f"👤 Login sebagai: **{st.session_state.get('username', 'User')}**")
+        if st.button("🔒 Logout", type="secondary"):
+            # Reset status login
+            st.session_state["password_correct"] = False
+            # Rerun untuk kembali ke halaman login
             st.rerun()
 
     # --- SESSION STATE ---
@@ -137,7 +131,7 @@ if check_password():
     # 3. DATABASE & TOOLS
     # ==========================================
     def init_db():
-        conn = sqlite3.connect('riwayat_v39_finalclean.db')
+        conn = sqlite3.connect('riwayat_v40_finalbtn.db')
         c = conn.cursor()
         c.execute('''CREATE TABLE IF NOT EXISTS riwayat (id INTEGER PRIMARY KEY, tgl TEXT, rhk TEXT, judul TEXT, lokasi TEXT)''')
         c.execute('''CREATE TABLE IF NOT EXISTS user_settings (
@@ -150,7 +144,7 @@ if check_password():
         conn.commit(); conn.close()
 
     def get_user_settings():
-        conn = sqlite3.connect('riwayat_v39_finalclean.db')
+        conn = sqlite3.connect('riwayat_v40_finalbtn.db')
         c = conn.cursor()
         c.execute('SELECT nama, nip, kpm, prov, kab, kec, kel FROM user_settings WHERE id=1')
         data = c.fetchone()
@@ -158,14 +152,14 @@ if check_password():
         return data
 
     def save_user_settings(nama, nip, kpm, prov, kab, kec, kel):
-        conn = sqlite3.connect('riwayat_v39_finalclean.db')
+        conn = sqlite3.connect('riwayat_v40_finalbtn.db')
         c = conn.cursor()
         c.execute('''UPDATE user_settings SET nama=?, nip=?, kpm=?, prov=?, kab=?, kec=?, kel=? WHERE id=1''', (nama, nip, kpm, prov, kab, kec, kel))
         conn.commit(); conn.close()
 
     def simpan_riwayat(rhk, judul, lokasi):
         try:
-            conn = sqlite3.connect('riwayat_v39_finalclean.db')
+            conn = sqlite3.connect('riwayat_v40_finalbtn.db')
             c = conn.cursor()
             tgl = datetime.now().strftime("%Y-%m-%d %H:%M")
             c.execute('INSERT INTO riwayat (tgl, rhk, judul, lokasi) VALUES (?, ?, ?, ?)', (tgl, rhk, judul, lokasi))
