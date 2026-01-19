@@ -48,6 +48,8 @@ def check_password():
             st.text_input("Username", key="username")
             st.text_input("Password", type="password", key="password", on_change=password_entered)
             
+            # TULISAN DEMO SUDAH DIHAPUS DI SINI
+            
         return False
     
     elif not st.session_state["password_correct"]:
@@ -70,11 +72,11 @@ if check_password():
     # ==========================================
 
     # --- API KEY (Manual Input) ---
-    GOOGLE_API_KEY = "AIzaSyA7bPifjqpei7CSSZuckB62oIN0OYlWY4Y"
+    GOOGLE_API_KEY = "MASUKKAN_KEY_GOOGLE_ANDA_DISINI"
 
     try:
         genai.configure(api_key=GOOGLE_API_KEY)
-        model = genai.GenerativeModel('gemini-flash-latest')
+        model = genai.GenerativeModel('gemini-1.5-flash')
     except: pass
 
     # --- TOMBOL LOGOUT (SIDEBAR) ---
@@ -135,7 +137,7 @@ if check_password():
     # 3. DATABASE & TOOLS
     # ==========================================
     def init_db():
-        conn = sqlite3.connect('riwayat_v38_final.db')
+        conn = sqlite3.connect('riwayat_v39_finalclean.db')
         c = conn.cursor()
         c.execute('''CREATE TABLE IF NOT EXISTS riwayat (id INTEGER PRIMARY KEY, tgl TEXT, rhk TEXT, judul TEXT, lokasi TEXT)''')
         c.execute('''CREATE TABLE IF NOT EXISTS user_settings (
@@ -148,7 +150,7 @@ if check_password():
         conn.commit(); conn.close()
 
     def get_user_settings():
-        conn = sqlite3.connect('riwayat_v38_final.db')
+        conn = sqlite3.connect('riwayat_v39_finalclean.db')
         c = conn.cursor()
         c.execute('SELECT nama, nip, kpm, prov, kab, kec, kel FROM user_settings WHERE id=1')
         data = c.fetchone()
@@ -156,14 +158,14 @@ if check_password():
         return data
 
     def save_user_settings(nama, nip, kpm, prov, kab, kec, kel):
-        conn = sqlite3.connect('riwayat_v38_final.db')
+        conn = sqlite3.connect('riwayat_v39_finalclean.db')
         c = conn.cursor()
         c.execute('''UPDATE user_settings SET nama=?, nip=?, kpm=?, prov=?, kab=?, kec=?, kel=? WHERE id=1''', (nama, nip, kpm, prov, kab, kec, kel))
         conn.commit(); conn.close()
 
     def simpan_riwayat(rhk, judul, lokasi):
         try:
-            conn = sqlite3.connect('riwayat_v38_final.db')
+            conn = sqlite3.connect('riwayat_v39_finalclean.db')
             c = conn.cursor()
             tgl = datetime.now().strftime("%Y-%m-%d %H:%M")
             c.execute('INSERT INTO riwayat (tgl, rhk, judul, lokasi) VALUES (?, ?, ?, ?)', (tgl, rhk, judul, lokasi))
@@ -533,6 +535,7 @@ if check_password():
             st.sidebar.success("Profil Tersimpan!")
 
     def show_dashboard():
+        # CSS: HARD FREEZE HEADER
         st.markdown("""
             <style>
             div[data-testid="stVerticalBlock"] > div:first-child {
@@ -896,4 +899,3 @@ if check_password():
     render_sidebar()
     if st.session_state['page'] == 'home': show_dashboard()
     elif st.session_state['page'] == 'detail': show_detail_page()
-
