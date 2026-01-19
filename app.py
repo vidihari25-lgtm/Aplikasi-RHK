@@ -64,7 +64,7 @@ if check_password():
     # ==========================================
 
     # --- API KEY (Manual Input) ---
-    GOOGLE_API_KEY = "AIzaSyA7bPifjqpei7CSSZuckB62oIN0OYlWY4Y"
+    GOOGLE_API_KEY = "AIzaSyAO2GJg87FaL91D580Ee0A0wB6Es1Hg4-g"
 
     try:
         genai.configure(api_key=GOOGLE_API_KEY)
@@ -893,3 +893,4 @@ if check_password():
     render_sidebar()
     if st.session_state['page'] == 'home': show_dashboard()
     elif st.session_state['page'] == 'detail': show_detail_page()
+
