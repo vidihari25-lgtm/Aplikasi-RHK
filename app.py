@@ -48,9 +48,6 @@ def check_password():
             st.text_input("Username", key="username")
             st.text_input("Password", type="password", key="password", on_change=password_entered)
             
-            # Info Login (Bisa dihapus jika sudah tidak butuh)
-            st.info("ℹ️ Akun Demo: admin / admin123") 
-            
         return False
     
     elif not st.session_state["password_correct"]:
@@ -899,3 +896,4 @@ if check_password():
     render_sidebar()
     if st.session_state['page'] == 'home': show_dashboard()
     elif st.session_state['page'] == 'detail': show_detail_page()
+
