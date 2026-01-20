@@ -140,7 +140,7 @@ if check_password():
         c.execute('SELECT count(*) FROM user_settings')
         if c.fetchone()[0] == 0:
             c.execute('INSERT INTO user_settings (id, nama, nip, kpm, prov, kab, kec, kel) VALUES (1, ?, ?, ?, ?, ?, ?, ?)',
-                    ("Vidi Hari Suci", "199103252025211054", "120", "Lampung", "Lampung Tengah", "Punggur", "Mojopahit"))
+                    ("Vidi Hari Suci", "123456", 250, "Lampung", "Lampung Tengah", "Punggur", "Mojopahit"))
         conn.commit(); conn.close()
 
     def get_user_settings():
@@ -407,7 +407,7 @@ if check_password():
         pdf = FPDF(); pdf.set_margins(25, 20, 25); pdf.add_page(); pdf.set_font("Times", size=12)
         def J(txt): pdf.multi_cell(0, 6, clean_text_for_pdf(txt), align='J')
         def TXT(s): return clean_text_for_pdf(s)
-        def J_indent(txt): pdf.multi_cell(0, 6, "       " + clean_text_for_pdf(txt), align='J')
+        def J_indent(txt): pdf.multi_cell(0, 6, "        " + clean_text_for_pdf(txt), align='J')
 
         if kop:
             with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp: tmp.write(kop); pth=tmp.name
@@ -507,7 +507,7 @@ if check_password():
             st.selectbox("Tahun", ["2026", "2027"], key="th_val", on_change=update_tanggal_surat)
         with c2:
             BULAN = ["JANUARI", "FEBRUARI", "MARET", "APRIL", "MEI", "JUNI", 
-                    "JULI", "AGUSTUS", "SEPTEMBER", "OKTOBER", "NOVEMBER", "DESEMBER"]
+                     "JULI", "AGUSTUS", "SEPTEMBER", "OKTOBER", "NOVEMBER", "DESEMBER"]
             if 'bln_val' not in st.session_state: st.session_state['bln_val'] = "JANUARI"
             st.selectbox("Bulan", BULAN, key="bln_val", on_change=update_tanggal_surat)
         
@@ -701,6 +701,7 @@ if check_password():
                     st.session_state['graduasi_fix'] = selected
                     st.success(f"Disimpan: {len(selected)} KPM")
             
+            # REVISI: Pastikan label bertuliskan (Opsional)
             ket_global = st.text_area("Keterangan Tambahan (Opsional):", placeholder="Contoh: Graduasi mandiri...", height=80)
             final_photos, new_uploads = render_photo_manager("rhk3")
 
@@ -757,6 +758,8 @@ if check_password():
                 
                 app_pilihan = ""
                 if is_rhk4: app_pilihan = st.selectbox("Aplikasi Digunakan:", ["SIKS-NG", "ESDM-PKH", "SIKMA Mobile"])
+                
+                # REVISI: Pastikan label bertuliskan (Opsional)
                 ket_tambahan = st.text_area("Keterangan Tambahan (Opsional):", placeholder="Contoh: Kegiatan berjalan lancar...", height=80)
                 
                 final_photos, new_uploads = render_photo_manager("queue_rhk")
@@ -854,6 +857,7 @@ if check_password():
                 # Jika ada RHK lain yang butuh input manual
                 judul_spesifik = st.text_input("Nama Kegiatan:", value=daftar_sub[0] if daftar_sub else "")
             
+            # REVISI: Pastikan label bertuliskan (Opsional)
             ket_umum = st.text_area("Keterangan Tambahan (Opsional):", placeholder="Contoh: Kegiatan berjalan lancar...", height=80)
             final_photos, new_uploads = render_photo_manager("biasa")
 
@@ -893,7 +897,3 @@ if check_password():
     render_sidebar()
     if st.session_state['page'] == 'home': show_dashboard()
     elif st.session_state['page'] == 'detail': show_detail_page()
-
-
-
-
