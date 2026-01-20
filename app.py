@@ -140,7 +140,7 @@ if check_password():
         c.execute('SELECT count(*) FROM user_settings')
         if c.fetchone()[0] == 0:
             c.execute('INSERT INTO user_settings (id, nama, nip, kpm, prov, kab, kec, kel) VALUES (1, ?, ?, ?, ?, ?, ?, ?)',
-                    ("Vidi Hari Suci", "199103252025211054", 120, "Lampung", "Lampung Tengah", "Punggur", "Mojopahit"))
+                    ("Vidi Hari Suci", "199103252025211054", "120", "Lampung", "Lampung Tengah", "Punggur", "Mojopahit"))
         conn.commit(); conn.close()
 
     def get_user_settings():
@@ -893,6 +893,7 @@ if check_password():
     render_sidebar()
     if st.session_state['page'] == 'home': show_dashboard()
     elif st.session_state['page'] == 'detail': show_detail_page()
+
 
 
 
