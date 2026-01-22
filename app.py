@@ -25,8 +25,9 @@ from googleapiclient.http import MediaIoBaseUpload
 # ==========================================
 st.set_page_config(page_title="Aplikasi RHK PKH Pro", layout="wide", page_icon="📊")
 
-# --- ID FOLDER GOOGLE DRIVE (GANTI DENGAN ID FOLDER ASLI ANDA) ---
-PARENT_FOLDER_ID = "MASUKKAN_ID_FOLDER_DRIVE_DISINI" 
+# --- KONFIGURASI GOOGLE DRIVE ---
+# GANTI DENGAN ID FOLDER GOOGLE DRIVE ANDA (Cek URL folder drive Anda)
+PARENT_FOLDER_ID = "1zaO1MEKf6dwbwB0LCLe_9dqDaZjTX1DB" 
 
 # --- DAFTAR USER & PASSWORD ---
 DAFTAR_USER = {
@@ -36,56 +37,49 @@ DAFTAR_USER = {
 }
 
 # ==========================================
-# 2. SISTEM KEAMANAN & LOGIN
+# 2. SISTEM KEAMANAN & KONEKSI
 # ==========================================
 
-try:
-    GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
-except:
-    st.error("🚨 Secrets tidak ditemukan!")
+# Cek Secrets
+if "GOOGLE_API_KEY" not in st.secrets:
+    st.error("🚨 Secrets GOOGLE_API_KEY belum diisi!")
     st.stop()
 
+if "gcp_service_account" not in st.secrets:
+    st.warning("⚠️ Secrets GCP Service Account belum diisi! Upload Drive tidak akan berfungsi.")
+
+# Konfigurasi AI
 try:
-    genai.configure(api_key=GOOGLE_API_KEY)
+    genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
     model = genai.GenerativeModel('gemini-flash-latest')
 except Exception as e:
     st.error(f"Gagal konfigurasi AI: {e}")
 
-# --- FUNGSI UPLOAD KE GOOGLE DRIVE ---
-def upload_to_gdrive(file_obj, filename, mime_type):
-    """Mengupload file BytesIO ke Google Drive"""
+# --- FUNGSI GOOGLE DRIVE ---
+def get_drive_service():
     try:
-        # Cek apakah secrets ada
-        if "gcp_service_account" not in st.secrets:
-            st.warning("⚠️ Konfigurasi Google Drive belum diset di secrets.toml")
-            return None
-
-        # Autentikasi
         creds_dict = dict(st.secrets["gcp_service_account"])
         creds = service_account.Credentials.from_service_account_info(
             creds_dict, scopes=['https://www.googleapis.com/auth/drive.file']
         )
-        service = build('drive', 'v3', credentials=creds)
+        return build('drive', 'v3', credentials=creds)
+    except: return None
 
-        # Siapkan File
-        file_metadata = {
-            'name': filename,
-            'parents': [PARENT_FOLDER_ID]
-        }
-        file_obj.seek(0) # Reset pointer
+def upload_to_drive(file_obj, filename, mime_type):
+    """Upload file langsung ke Google Drive"""
+    service = get_drive_service()
+    if not service: return None
+    try:
+        file_obj.seek(0)
+        metadata = {'name': filename, 'parents': [PARENT_FOLDER_ID]}
         media = MediaIoBaseUpload(file_obj, mimetype=mime_type, resumable=True)
-
-        # Upload
-        file = service.files().create(
-            body=file_metadata, media_body=media, fields='id, webViewLink'
-        ).execute()
-        
-        return file.get('webViewLink') # Kembalikan Link File
+        file = service.files().create(body=metadata, media_body=media, fields='webViewLink').execute()
+        return file.get('webViewLink')
     except Exception as e:
         st.error(f"Gagal Upload Drive: {e}")
         return None
 
-# --- FUNGSI LOGIN ---
+# --- CEK PASSWORD ---
 def check_password():
     if st.session_state.get("password_correct", False): return True
     qp = st.query_params
@@ -116,7 +110,7 @@ if check_password():
     # ==========================================
     st.markdown("""
         <style>
-        /* CSS TOMBOL UTAMA (KOTAK PERSEGI) */
+        /* 1. TOMBOL UTAMA MENJADI KOTAK PERSEGI (1:1) */
         div[data-testid="column"] button {
             width: 100% !important;
             aspect-ratio: 1 / 1 !important; 
@@ -130,21 +124,33 @@ if check_password():
             border-radius: 15px !important;
             border: 1px solid #e0e0e0 !important;
             box-shadow: 0 4px 6px rgba(0,0,0,0.05) !important;
+            transition: transform 0.2s !important;
         }
         div[data-testid="column"] button:hover {
             transform: scale(1.03) !important;
             border-color: #ff4b4b !important;
+            background-color: #fffafb !important;
         }
+        
+        /* 2. HIRARKI FONT TOMBOL */
         div[data-testid="column"] button p {
-            text-align: center !important; line-height: 1.4 !important; margin: 0 !important;
+            text-align: center !important; margin: 0 !important;
         }
+        /* Baris 1 (Judul): Besar & Tebal */
         div[data-testid="column"] button p::first-line {
-            font-size: 1.4rem !important; font-weight: 800 !important; color: #31333F !important;
+            font-size: 1.5rem !important; 
+            font-weight: 800 !important; 
+            line-height: 2 !important;
+            color: #31333F !important;
         }
+        /* Baris 2 (Ket): Kecil & Menyesuaikan */
         div[data-testid="column"] button p {
-            font-size: 0.9rem !important; font-weight: 400 !important; color: #555 !important;
+            font-size: 0.9rem !important; 
+            font-weight: 400 !important; 
+            color: #555 !important;
         }
-        /* TOMBOL LOGOUT */
+
+        /* 3. TOMBOL SIDEBAR */
         section[data-testid="stSidebar"] button {
             width: 100% !important; border-radius: 8px !important; border: 1px solid #ccc !important;
         }
@@ -169,6 +175,7 @@ if check_password():
     if "page" in st.query_params: st.session_state['page'] = st.query_params["page"]
     if "rhk" in st.query_params: st.session_state['selected_rhk'] = st.query_params["rhk"]
 
+    # Init State
     if st.session_state['rhk2_queue'] is None: st.session_state['rhk2_queue'] = []
     if st.session_state['rhk4_queue'] is None: st.session_state['rhk4_queue'] = []
     if st.session_state['rhk7_queue'] is None: st.session_state['rhk7_queue'] = []
@@ -216,8 +223,8 @@ if check_password():
         except: pass
 
     init_db()
-    BASE_ARSIP = "Arsip_Foto_Kegiatan"
 
+    # --- TOOLS & HELPERS ---
     def compress_image(uploaded_file, quality=70, max_width=800):
         try:
             uploaded_file.seek(0); image = Image.open(uploaded_file)
@@ -228,38 +235,6 @@ if check_password():
             output = io.BytesIO(); image.save(output, format="JPEG", quality=quality, optimize=True)
             output.seek(0); uploaded_file.seek(0); return output
         except: uploaded_file.seek(0); return uploaded_file 
-
-    def get_folder_path(rhk, per):
-        try: parts=per.split(" "); b=parts[0]; t=parts[1]
-        except: b="UMUM"; t="2026"
-        return os.path.join(BASE_ARSIP, t, b, rhk.replace("–", "-").strip())
-
-    def count_archived_photos():
-        t = 0
-        if os.path.exists(BASE_ARSIP):
-            for r, d, f in os.walk(BASE_ARSIP): t += len([x for x in f if x.endswith(('jpg','png','jpeg'))])
-        return t
-
-    def auto_save_photo_local(f_obj, rhk, per):
-        try:
-            tf = get_folder_path(rhk, per); 
-            if not os.path.exists(tf): os.makedirs(tf)
-            cb = compress_image(f_obj); ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            fn = f"{ts}_{f_obj.name.replace(' ', '_')}"
-            with open(os.path.join(tf, fn), "wb") as f: f.write(cb.getvalue())
-            return True
-        except: return False
-
-    def get_archived_photos(rhk, per):
-        tf = get_folder_path(rhk, per)
-        if os.path.exists(tf): 
-            fl = [f for f in os.listdir(tf) if f.lower().endswith(('jpg','png','jpeg'))]
-            fl.sort(reverse=True); return fl
-        return []
-
-    def load_photo_from_disk(rhk, per, fn):
-        path = os.path.join(get_folder_path(rhk, per), fn)
-        with open(path, "rb") as f: return io.BytesIO(f.read())
 
     def safe_str(d): return str(list(d.values())[0]) if isinstance(d, dict) else "-" if d is None else str(d)
     def clean_text_for_pdf(t): return safe_str(t).encode('latin-1', 'replace').decode('latin-1')
@@ -285,6 +260,9 @@ if check_password():
                 return None
         return None
 
+    # ==========================================
+    # 5. DOCUMENT GENERATORS
+    # ==========================================
     def create_word_doc(data, meta, imgs, kop, ttd, extra_info=None, kpm_data=None):
         doc = Document(); 
         for s in doc.sections: s.top_margin=Cm(2); s.bottom_margin=Cm(2); s.left_margin=Cm(2.5); s.right_margin=Cm(2.5)
@@ -337,7 +315,6 @@ if check_password():
                     cl=rt.cell(i//2, i%2); p=cl.paragraphs[0]; p.alignment=1
                     im.seek(0); p.add_run().add_picture(compress_image(im), width=Inches(2.8)); p.add_run(f"\nFoto {i+1}")
                 except: pass
-        
         bio=io.BytesIO(); doc.save(bio); return bio
 
     def create_pdf_doc(data, meta, imgs, kop, ttd, extra_info=None, kpm_data=None):
@@ -395,7 +372,7 @@ if check_password():
         return pdf.output(dest='S').encode('latin-1')
 
     # ==========================================
-    # 8. UI HANDLER
+    # 6. UI HANDLER
     # ==========================================
     def update_tgl():
         d="28" if st.session_state.bln_val=="FEBRUARI" else "30"
@@ -419,7 +396,7 @@ if check_password():
         with c2: st.selectbox("Bulan", ["JANUARI", "FEBRUARI", "MARET", "APRIL", "MEI", "JUNI", "JULI", "AGUSTUS", "SEPTEMBER", "OKTOBER", "NOVEMBER", "DESEMBER"], key="bln_val", on_change=update_tgl)
         st.sidebar.text_input("Tanggal Surat", key="tgl_val")
         
-        st.sidebar.markdown("---"); st.sidebar.info(f"📂 Arsip: {count_archived_photos()} Foto")
+        st.sidebar.markdown("---")
         k = st.sidebar.file_uploader("Kop", type=['png','jpg'])
         t = st.sidebar.file_uploader("TTD", type=['png','jpg'])
         if st.sidebar.button("💾 SIMPAN PROFIL"):
@@ -435,7 +412,7 @@ if check_password():
             ic = "💸" if "RHK 1" in k else "📚" if "RHK 2" in k else "🎓" if "RHK 3" in k else "📝" if "RHK 4" in k else "👥" if "RHK 5" in k else "🆘" if "RHK 6" in k else "📢"
             lbl = f"{ic} {k.split('–')[0].strip()}\n\n{k.split('–')[-1].strip()}"
             with cols[i % 4]:
-                if st.button(lbl, key=f"b_{i}"):
+                if st.button(lbl, key=f"b_{i}", use_container_width=True): # USE CONTAINER WIDTH = PENTING UNTUK KOTAK
                     st.session_state['selected_rhk']=k; st.session_state['page']='detail'
                     st.query_params["page"]="detail"; st.query_params["rhk"]=k; reset_states(); st.rerun()
 
@@ -467,15 +444,8 @@ if check_password():
 
         def phot_man(suf):
             st.write("#### 📸 Dokumentasi")
-            t1, t2 = st.tabs(["📤 Upload", "🗂️ Arsip"]); sel=[]
-            with t1: 
-                up = st.file_uploader("File Foto", type=['jpg','png'], accept_multiple_files=True, key=f"u_{suf}")
-                if up: sel=[io.BytesIO(f.getvalue()) for f in up]
-            with t2:
-                sv = get_archived_photos(cr, meta['bulan'])
-                if sv: 
-                    for x in st.multiselect("Pilih Arsip:", sv, key=f"m_{suf}"): sel.append(load_photo_from_disk(cr, meta['bulan'], x))
-                else: st.info("Kosong")
+            up = st.file_uploader("Upload Foto", type=['jpg','png'], accept_multiple_files=True, key=f"u_{suf}")
+            sel=[io.BytesIO(f.getvalue()) for f in up] if up else []
             return sel, up
 
         if "RHK 3" in cr:
@@ -495,7 +465,8 @@ if check_password():
 
             ket = st.text_area("Keterangan:", height=80); ph, nu = phot_man("3")
             if st.button("🚀 Generate RHK 3", type="primary"):
-                if nu: [auto_save_photo_local(f, cr, meta['bulan']) for f in nu]
+                if nu: 
+                    for f in nu: upload_to_drive(f, f"FOTO_{cr}", "image/jpeg") # UPLOAD FOTO RAW KE DRIVE
                 kp = st.session_state.get('graduasi_fix', []); res=[]
                 pr = st.progress(0); stt = st.empty()
                 for i, k in enumerate(kp):
@@ -505,9 +476,9 @@ if check_password():
                         [p.seek(0) for p in ph]; w_io=io.BytesIO(create_word_doc(dt, meta, ph, kop, ttd, {'desc':ket}, k).getvalue()); w_io.seek(0)
                         p_io=io.BytesIO(create_pdf_doc(dt, meta, ph, kop, ttd, {'desc':ket}, k)); p_io.seek(0)
                         
-                        # UPLOAD DRIVE
-                        w_link = upload_to_gdrive(w_io, f"Laporan_{nm}.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-                        p_link = upload_to_gdrive(p_io, f"Laporan_{nm}.pdf", "application/pdf")
+                        # UPLOAD HASIL KE DRIVE
+                        w_link = upload_to_drive(w_io, f"Laporan_{nm}.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+                        p_link = upload_to_drive(p_io, f"Laporan_{nm}.pdf", "application/pdf")
                         
                         res.append({'nama': nm, 'word': w_io.getvalue(), 'pdf': p_io.getvalue(), 'link': w_link})
                     pr.progress((i+1)/len(kp))
@@ -532,7 +503,8 @@ if check_password():
                 if st.button("Masuk Antrian"):
                     if not ph: st.error("Foto Wajib!")
                     else:
-                        if nu: [auto_save_photo_local(f, cr, meta['bulan']) for f in nu]
+                        if nu: 
+                            for f in nu: upload_to_drive(f, f"FOTO_{cr}", "image/jpeg")
                         st.session_state[qk].append({"modul": md, "foto": ph, "foto_count": len(ph), "app": ap, "desc": kt})
                         st.success("Masuk!"); time.sleep(0.5); st.rerun()
             
@@ -551,8 +523,8 @@ if check_password():
                             w_io = io.BytesIO(create_word_doc(d, meta, it['foto'], kop, ttd, {'desc':it.get('desc')}).getvalue()); w_io.seek(0)
                             p_io = io.BytesIO(create_pdf_doc(d, meta, it['foto'], kop, ttd, {'desc':it.get('desc')})); p_io.seek(0)
                             
-                            w_link = upload_to_gdrive(w_io, f"{nm}.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-                            p_link = upload_to_gdrive(p_io, f"{nm}.pdf", "application/pdf")
+                            w_link = upload_to_drive(w_io, f"{nm}.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+                            p_link = upload_to_drive(p_io, f"{nm}.pdf", "application/pdf")
                             
                             res.append({'nama': nm, 'word': w_io.getvalue(), 'pdf': p_io.getvalue(), 'link': w_link})
                         pr.progress((i+1)/len(q))
@@ -572,7 +544,8 @@ if check_password():
             kt = st.text_area("Ket:", height=80); ph, nu = phot_man("s")
             
             if st.button("🚀 Generate Laporan", type="primary"):
-                if nu: [auto_save_photo_local(f, cr, meta['bulan']) for f in nu]
+                if nu: 
+                    for f in nu: upload_to_drive(f, f"FOTO_{cr}", "image/jpeg")
                 with st.status("Proses...", expanded=True) as s:
                     st.write("Analisis..."); time.sleep(2); st.write("AI Generating...")
                     d = generate_isi_laporan(cr, jk, meta['kpm'], "Peserta", meta['bulan'], loc, ket_info=kt)
@@ -581,8 +554,8 @@ if check_password():
                         [p.seek(0) for p in ph]; w_io=io.BytesIO(create_word_doc(d, meta, ph, kop, ttd, {'desc':kt}).getvalue()); w_io.seek(0)
                         [p.seek(0) for p in ph]; p_io=io.BytesIO(create_pdf_doc(d, meta, ph, kop, ttd, {'desc':kt})); p_io.seek(0)
                         
-                        w_link = upload_to_gdrive(w_io, f"{cr}.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-                        p_link = upload_to_gdrive(p_io, f"{cr}.pdf", "application/pdf")
+                        w_link = upload_to_drive(w_io, f"{cr}.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+                        p_link = upload_to_drive(p_io, f"{cr}.pdf", "application/pdf")
                         
                         st.session_state['generated_file_data']={'name':cr, 'word':w_io.getvalue(), 'pdf':p_io.getvalue(), 'link': w_link}
                         simpan_riwayat(cr, "Gen", meta['kel']); s.update(label="Selesai!", state="complete", expanded=False)
