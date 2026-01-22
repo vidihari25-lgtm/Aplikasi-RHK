@@ -7,893 +7,594 @@ from fpdf import FPDF
 import io
 import pandas as pd
 import sqlite3
-import zipfile
 from datetime import datetime
 import time
 import os
 from PIL import Image
 import tempfile
+import json
+import re
+
+# --- LIBRARY GOOGLE DRIVE ---
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
 
 # ==========================================
 # 1. KONFIGURASI HALAMAN
 # ==========================================
-st.set_page_config(page_title="Aplikasi RHK PKH Pro", layout="wide")
+st.set_page_config(page_title="Aplikasi RHK PKH Pro", layout="wide", page_icon="📊")
 
-# --- DAFTAR USER & PASSWORD (EDIT DISINI) ---
+# --- ID FOLDER GOOGLE DRIVE (GANTI DENGAN ID FOLDER ASLI ANDA) ---
+PARENT_FOLDER_ID = "MASUKKAN_ID_FOLDER_DRIVE_DISINI" 
+
+# --- DAFTAR USER & PASSWORD ---
 DAFTAR_USER = {
     "admin": "admin123",
     "pendamping": "pkh2026",
     "user": "user"
 }
 
-# --- SISTEM KEAMANAN (LOGIN DENGAN TOMBOL) ---
+# ==========================================
+# 2. SISTEM KEAMANAN & LOGIN
+# ==========================================
+
+try:
+    GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
+except:
+    st.error("🚨 Secrets tidak ditemukan!")
+    st.stop()
+
+try:
+    genai.configure(api_key=GOOGLE_API_KEY)
+    model = genai.GenerativeModel('gemini-flash-latest')
+except Exception as e:
+    st.error(f"Gagal konfigurasi AI: {e}")
+
+# --- FUNGSI UPLOAD KE GOOGLE DRIVE ---
+def upload_to_gdrive(file_obj, filename, mime_type):
+    """Mengupload file BytesIO ke Google Drive"""
+    try:
+        # Cek apakah secrets ada
+        if "gcp_service_account" not in st.secrets:
+            st.warning("⚠️ Konfigurasi Google Drive belum diset di secrets.toml")
+            return None
+
+        # Autentikasi
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        creds = service_account.Credentials.from_service_account_info(
+            creds_dict, scopes=['https://www.googleapis.com/auth/drive.file']
+        )
+        service = build('drive', 'v3', credentials=creds)
+
+        # Siapkan File
+        file_metadata = {
+            'name': filename,
+            'parents': [PARENT_FOLDER_ID]
+        }
+        file_obj.seek(0) # Reset pointer
+        media = MediaIoBaseUpload(file_obj, mimetype=mime_type, resumable=True)
+
+        # Upload
+        file = service.files().create(
+            body=file_metadata, media_body=media, fields='id, webViewLink'
+        ).execute()
+        
+        return file.get('webViewLink') # Kembalikan Link File
+    except Exception as e:
+        st.error(f"Gagal Upload Drive: {e}")
+        return None
+
+# --- FUNGSI LOGIN ---
 def check_password():
-    """Mengembalikan True jika user berhasil login."""
-    
-    # Cek apakah user sudah login sebelumnya
-    if st.session_state.get("password_correct", False):
+    if st.session_state.get("password_correct", False): return True
+    qp = st.query_params
+    if qp.get("auth") == "valid" and qp.get("user") in DAFTAR_USER:
+        st.session_state["password_correct"] = True
+        st.session_state["username"] = qp.get("user")
         return True
 
-    # TAMPILAN HALAMAN LOGIN
     st.markdown("<br><br>", unsafe_allow_html=True)
     st.markdown("<h1 style='text-align: center;'>🔐 LOGIN APLIKASI</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center;'>Silakan masukkan akun Pendamping PKH Anda</p>", unsafe_allow_html=True)
-    
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        # Input Username & Password
-        input_user = st.text_input("Username")
-        input_pass = st.text_input("Password", type="password")
-        
-        # TOMBOL LOGIN (Action Trigger)
+    c1, c2, c3 = st.columns([1, 2, 1])
+    with c2:
+        u = st.text_input("Username", key="login_user")
+        p = st.text_input("Password", type="password", key="login_pass")
         if st.button("MASUK / LOGIN", type="primary", use_container_width=True):
-            if input_user in DAFTAR_USER and DAFTAR_USER[input_user] == input_pass:
+            if u in DAFTAR_USER and DAFTAR_USER[u] == p:
                 st.session_state["password_correct"] = True
-                st.session_state["username"] = input_user # Simpan nama user
-                st.rerun() # Refresh halaman untuk masuk ke aplikasi
-            else:
-                st.error("😕 Username atau Password Salah!")
-                
+                st.session_state["username"] = u
+                st.query_params["auth"] = "valid"; st.query_params["user"] = u
+                st.rerun()
+            else: st.error("Salah!")
     return False
 
-# --- JALANKAN APLIKASI HANYA JIKA LOGIN SUKSES ---
 if check_password():
 
     # ==========================================
-    # KODE APLIKASI UTAMA
+    # 3. CSS TATA LETAK (TOMBOL KOTAK)
     # ==========================================
+    st.markdown("""
+        <style>
+        /* CSS TOMBOL UTAMA (KOTAK PERSEGI) */
+        div[data-testid="column"] button {
+            width: 100% !important;
+            aspect-ratio: 1 / 1 !important; 
+            height: auto !important;
+            padding: 10px !important;
+            white-space: pre-wrap !important;
+            display: flex !important;
+            flex-direction: column !important;
+            justify-content: center !important;
+            align-items: center !important;
+            border-radius: 15px !important;
+            border: 1px solid #e0e0e0 !important;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.05) !important;
+        }
+        div[data-testid="column"] button:hover {
+            transform: scale(1.03) !important;
+            border-color: #ff4b4b !important;
+        }
+        div[data-testid="column"] button p {
+            text-align: center !important; line-height: 1.4 !important; margin: 0 !important;
+        }
+        div[data-testid="column"] button p::first-line {
+            font-size: 1.4rem !important; font-weight: 800 !important; color: #31333F !important;
+        }
+        div[data-testid="column"] button p {
+            font-size: 0.9rem !important; font-weight: 400 !important; color: #555 !important;
+        }
+        /* TOMBOL LOGOUT */
+        section[data-testid="stSidebar"] button {
+            width: 100% !important; border-radius: 8px !important; border: 1px solid #ccc !important;
+        }
+        </style>
+    """, unsafe_allow_html=True)
 
-    # --- API KEY (Manual Input) ---
-    GOOGLE_API_KEY = "Apikeydisini"
-
-    try:
-        genai.configure(api_key=GOOGLE_API_KEY)
-        model = genai.GenerativeModel('gemini-flash-latest')
-    except: pass
-
-    # --- TOMBOL LOGOUT (SIDEBAR) ---
+    # ==========================================
+    # 4. SETUP STATE & DB
+    # ==========================================
     with st.sidebar:
-        st.write(f"👤 Login sebagai: **{st.session_state.get('username', 'User')}**")
-        if st.button("🔒 Logout", type="secondary"):
-            # Reset status login
+        st.write(f"👤 Login: **{st.session_state.get('username', 'User')}**")
+        if st.button("🔒 Logout"):
             st.session_state["password_correct"] = False
-            # Rerun untuk kembali ke halaman login
-            st.rerun()
+            st.query_params.clear(); st.rerun()
 
-    # --- SESSION STATE ---
-    keys = ['page', 'selected_rhk', 'kop_bytes', 'ttd_bytes', 'db_kpm', 
-            'graduasi_raw', 'graduasi_fix', 'generated_file_data', 
-            'rhk3_results', 'rhk2_queue', 'rhk2_results', 
-            'rhk4_queue', 'rhk4_results',
-            'rhk7_queue', 'rhk7_results',
-            'tgl_val', 'bln_val', 'th_val'] 
-
+    keys = ['page', 'selected_rhk', 'kop_bytes', 'ttd_bytes', 'graduasi_raw', 'graduasi_fix', 
+            'generated_file_data', 'rhk3_results', 'rhk2_queue', 'rhk2_results', 
+            'rhk4_queue', 'rhk4_results', 'rhk7_queue', 'rhk7_results', 'tgl_val', 'bln_val', 'th_val'] 
     for k in keys:
         if k not in st.session_state: st.session_state[k] = None
+
+    if "page" in st.query_params: st.session_state['page'] = st.query_params["page"]
+    if "rhk" in st.query_params: st.session_state['selected_rhk'] = st.query_params["rhk"]
 
     if st.session_state['rhk2_queue'] is None: st.session_state['rhk2_queue'] = []
     if st.session_state['rhk4_queue'] is None: st.session_state['rhk4_queue'] = []
     if st.session_state['rhk7_queue'] is None: st.session_state['rhk7_queue'] = []
     if st.session_state['page'] is None: st.session_state['page'] = 'home'
+    if not st.session_state['bln_val']: st.session_state['bln_val'] = "JANUARI"
+    if not st.session_state['th_val']: st.session_state['th_val'] = "2026"
+    if not st.session_state['tgl_val']: st.session_state['tgl_val'] = "30 Januari 2026"
 
-    # Init Tanggal Default
-    if 'bln_val' not in st.session_state or st.session_state['bln_val'] is None: 
-        st.session_state['bln_val'] = "JANUARI"
-    if 'th_val' not in st.session_state or st.session_state['th_val'] is None: 
-        st.session_state['th_val'] = "2026"
-    if 'tgl_val' not in st.session_state or st.session_state['tgl_val'] is None: 
-        st.session_state['tgl_val'] = "30 Januari 2026"
-
-    # ==========================================
-    # 2. CONFIG DATA
-    # ==========================================
     CONFIG_LAPORAN = {
         "RHK 1 – LAPORAN PENYALURAN": ["Laporan Penyaluran Bantuan Sosial"],
-        "RHK 2 – LAPORAN P2K2 (FDS)": [
-            "Modul Ekonomi 1: Mengelola Keuangan Keluarga", "Modul Ekonomi 2: Cermat Meminjam Dan Menabung", "Modul Ekonomi 3: Memulai Usaha",
-            "Modul Kesehatan 1: Pentingnya Gizi Ibu Hamil", "Modul Kesehatan 2: Pentingnya Gizi Ibu Menyusui & Balita", "Modul Kesehatan 3: Kesakitan Anak & Kesling",
-            "Modul Kesehatan 4: Permainan Anak", "Modul Kesejahteraan 1: Disabilitas Berat", "Modul Kesejahteraan 2: Kesejahteraan Lanjut Usia",
-            "Modul Pengasuhan 1: Menjadi Orangtua Lebih Baik", "Modul Pengasuhan 2: Perilaku Anak", "Modul Pengasuhan 3: Cara Anak Usia Dini Belajar",
-            "Modul Pengasuhan 4: Membantu Anak Sukses Sekolah", "Modul Perlindungan 1: Pencegahan Kekerasan Anak", "Modul Perlindungan 2: Penelantaran & Eksploitasi Anak"
-        ],
+        "RHK 2 – LAPORAN P2K2 (FDS)": ["Modul Ekonomi 1", "Modul Ekonomi 2", "Modul Kesehatan 1", "Modul Kesehatan 2", "Modul Pengasuhan 1", "Modul Perlindungan 1"],
         "RHK 3 – TARGET GRADUASI MANDIRI": ["Laporan Graduasi Mandiri"], 
-        "RHK 4 – KEGIATAN PEMUTAKHIRAN": [
-            "Verifikasi Fasilitas Pendidikan", 
-            "Verifikasi Fasilitas Kesehatan", 
-            "Verifikasi Kesejahteraan Sosial"
-        ],
-        "RHK 5 – KPM YANG DIMUTAKHIRKAN": ["Laporan Hasil Pemutakhiran Data KPM"],
-        "RHK 6 – LAPORAN KASUS ADAPTIF": ["Laporan Penanganan Kasus (Case Management)"],
-        "RHK 7 – LAPORAN DIREKTIF": ["Tugas Direktif Pimpinan (A)", "Tugas Direktif Pimpinan (B)"]
+        "RHK 4 – KEGIATAN PEMUTAKHIRAN": ["Verifikasi Pendidikan", "Verifikasi Kesehatan", "Verifikasi Kesos"],
+        "RHK 5 – KPM YANG DIMUTAKHIRKAN": ["Laporan Pemutakhiran Data"],
+        "RHK 6 – LAPORAN KASUS ADAPTIF": ["Case Management"],
+        "RHK 7 – LAPORAN DIREKTIF": ["Tugas Direktif"]
     }
 
-    # ==========================================
-    # 3. DATABASE & TOOLS
-    # ==========================================
     def init_db():
         conn = sqlite3.connect('riwayat_v40_finalbtn.db')
         c = conn.cursor()
         c.execute('''CREATE TABLE IF NOT EXISTS riwayat (id INTEGER PRIMARY KEY, tgl TEXT, rhk TEXT, judul TEXT, lokasi TEXT)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS user_settings (
-            id INTEGER PRIMARY KEY, nama TEXT, nip TEXT, kpm INTEGER, 
-            prov TEXT, kab TEXT, kec TEXT, kel TEXT)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS user_settings (id INTEGER PRIMARY KEY, nama TEXT, nip TEXT, kpm INTEGER, prov TEXT, kab TEXT, kec TEXT, kel TEXT)''')
         c.execute('SELECT count(*) FROM user_settings')
         if c.fetchone()[0] == 0:
-            c.execute('INSERT INTO user_settings (id, nama, nip, kpm, prov, kab, kec, kel) VALUES (1, ?, ?, ?, ?, ?, ?, ?)',
-                    ("Vidi Hari Suci", "123456", 250, "Lampung", "Lampung Tengah", "Punggur", "Mojopahit"))
+            c.execute('INSERT INTO user_settings VALUES (1, "Vidi Hari Suci", "123456", 250, "Lampung", "Lampung Tengah", "Punggur", "Mojopahit")')
         conn.commit(); conn.close()
 
     def get_user_settings():
-        conn = sqlite3.connect('riwayat_v40_finalbtn.db')
-        c = conn.cursor()
+        conn = sqlite3.connect('riwayat_v40_finalbtn.db'); c = conn.cursor()
         c.execute('SELECT nama, nip, kpm, prov, kab, kec, kel FROM user_settings WHERE id=1')
-        data = c.fetchone()
-        conn.close()
-        return data
+        data = c.fetchone(); conn.close(); return data
 
     def save_user_settings(nama, nip, kpm, prov, kab, kec, kel):
-        conn = sqlite3.connect('riwayat_v40_finalbtn.db')
-        c = conn.cursor()
+        conn = sqlite3.connect('riwayat_v40_finalbtn.db'); c = conn.cursor()
         c.execute('''UPDATE user_settings SET nama=?, nip=?, kpm=?, prov=?, kab=?, kec=?, kel=? WHERE id=1''', (nama, nip, kpm, prov, kab, kec, kel))
         conn.commit(); conn.close()
 
     def simpan_riwayat(rhk, judul, lokasi):
         try:
-            conn = sqlite3.connect('riwayat_v40_finalbtn.db')
-            c = conn.cursor()
+            conn = sqlite3.connect('riwayat_v40_finalbtn.db'); c = conn.cursor()
             tgl = datetime.now().strftime("%Y-%m-%d %H:%M")
             c.execute('INSERT INTO riwayat (tgl, rhk, judul, lokasi) VALUES (?, ?, ?, ?)', (tgl, rhk, judul, lokasi))
             conn.commit(); conn.close()
         except: pass
 
     init_db()
-
-    # --- MANAJEMEN FOTO & KOMPRESI ---
     BASE_ARSIP = "Arsip_Foto_Kegiatan"
 
     def compress_image(uploaded_file, quality=70, max_width=800):
         try:
-            uploaded_file.seek(0)
-            image = Image.open(uploaded_file)
+            uploaded_file.seek(0); image = Image.open(uploaded_file)
             if image.mode in ("RGBA", "P"): image = image.convert("RGB")
             if image.width > max_width:
-                ratio = max_width / float(image.width)
-                new_height = int((float(image.height) * float(ratio)))
+                ratio = max_width / float(image.width); new_height = int((float(image.height) * float(ratio)))
                 image = image.resize((max_width, new_height), Image.Resampling.LANCZOS)
-            output = io.BytesIO()
-            image.save(output, format="JPEG", quality=quality, optimize=True)
-            output.seek(0); uploaded_file.seek(0)
-            return output
-        except Exception as e:
-            uploaded_file.seek(0)
-            return uploaded_file 
+            output = io.BytesIO(); image.save(output, format="JPEG", quality=quality, optimize=True)
+            output.seek(0); uploaded_file.seek(0); return output
+        except: uploaded_file.seek(0); return uploaded_file 
 
-    def get_folder_path(rhk_name, periode_str):
-        try:
-            if not periode_str or " " not in periode_str: b="UMUM"; t="2026"
-            else: parts=periode_str.split(" "); b=parts[0]; t=parts[1]
+    def get_folder_path(rhk, per):
+        try: parts=per.split(" "); b=parts[0]; t=parts[1]
         except: b="UMUM"; t="2026"
-        clean_rhk = rhk_name.replace("–", "-").strip()
-        return os.path.join(BASE_ARSIP, t, b, clean_rhk)
+        return os.path.join(BASE_ARSIP, t, b, rhk.replace("–", "-").strip())
 
     def count_archived_photos():
-        total = 0
+        t = 0
         if os.path.exists(BASE_ARSIP):
-            for root, dirs, files in os.walk(BASE_ARSIP):
-                total += len([f for f in files if f.lower().endswith(('.png','.jpg','.jpeg'))])
-        return total
+            for r, d, f in os.walk(BASE_ARSIP): t += len([x for x in f if x.endswith(('jpg','png','jpeg'))])
+        return t
 
-    def auto_save_photo_local(uploaded_file_obj, rhk_name, periode_str):
+    def auto_save_photo_local(f_obj, rhk, per):
         try:
-            target_folder = get_folder_path(rhk_name, periode_str)
-            if not os.path.exists(target_folder): os.makedirs(target_folder)
-            compressed_bytes = compress_image(uploaded_file_obj)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            clean_name = uploaded_file_obj.name.replace(" ", "_")
-            final_name = f"{timestamp}_{clean_name}"
-            with open(os.path.join(target_folder, final_name), "wb") as f:
-                f.write(compressed_bytes.getvalue())
+            tf = get_folder_path(rhk, per); 
+            if not os.path.exists(tf): os.makedirs(tf)
+            cb = compress_image(f_obj); ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            fn = f"{ts}_{f_obj.name.replace(' ', '_')}"
+            with open(os.path.join(tf, fn), "wb") as f: f.write(cb.getvalue())
             return True
         except: return False
 
-    def get_archived_photos(rhk_name, periode_str):
-        target_folder = get_folder_path(rhk_name, periode_str)
-        if os.path.exists(target_folder):
-            files = [f for f in os.listdir(target_folder) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
-            files.sort(reverse=True)
-            return files
+    def get_archived_photos(rhk, per):
+        tf = get_folder_path(rhk, per)
+        if os.path.exists(tf): 
+            fl = [f for f in os.listdir(tf) if f.lower().endswith(('jpg','png','jpeg'))]
+            fl.sort(reverse=True); return fl
         return []
 
-    def load_photo_from_disk(rhk_name, periode_str, filename):
-        path = os.path.join(get_folder_path(rhk_name, periode_str), filename)
+    def load_photo_from_disk(rhk, per, fn):
+        path = os.path.join(get_folder_path(rhk, per), fn)
         with open(path, "rb") as f: return io.BytesIO(f.read())
 
-    # --- TOOLS ---
-    def safe_str(data):
-        if data is None: return "-"
-        if isinstance(data, dict): return str(list(data.values())[0])
-        if isinstance(data, list): return "\n".join([str(x) for x in data])
-        return str(data)
-
-    def clean_text_for_pdf(text):
-        text = safe_str(text)
-        replacements = {'\u2013': '-', '\u2014': '-', '\u2018': "'", '\u2019': "'", '\u201c': '"', '\u201d': '"', '\u2022': '-', '\u2026': '...'}
-        for k, v in replacements.items(): text = text.replace(k, v)
-        return text.encode('latin-1', 'replace').decode('latin-1')
-
+    def safe_str(d): return str(list(d.values())[0]) if isinstance(d, dict) else "-" if d is None else str(d)
+    def clean_text_for_pdf(t): return safe_str(t).encode('latin-1', 'replace').decode('latin-1')
     def reset_states():
-        st.session_state['rhk2_queue'] = []
-        st.session_state['rhk4_queue'] = []
-        st.session_state['rhk7_queue'] = []
-        st.session_state['generated_file_data'] = None
+        st.session_state['rhk2_queue'] = []; st.session_state['rhk4_queue'] = []
+        st.session_state['rhk7_queue'] = []; st.session_state['generated_file_data'] = None
         st.session_state['rhk3_results'] = None
-        st.session_state['rhk2_results'] = []
-        st.session_state['rhk4_results'] = []
-        st.session_state['rhk7_results'] = []
 
-    # ==========================================
-    # 4. ENGINE AI (FORMAT KHUSUS)
-    # ==========================================
     def generate_isi_laporan(topik, detail, kpm_total, kpm_fokus, bulan, lokasi_lengkap, analisis="", app_info="", ket_info=""):
         max_retries = 3
-        
-        prompt = f"""
-        Role: Pendamping PKH Profesional.
-        Buat JSON Laporan Kegiatan.
-        
-        KONTEKS:
-        - RHK: {topik} | Nama Kegiatan: {detail} 
-        - Lokasi: {lokasi_lengkap} | Periode: {bulan}
-        - CATATAN USER (Topik Utama): {ket_info} (Wajib dimasukkan ke narasi sebagai topik utama).
-        
-        Output JSON Wajib (lowercase key, sesuaikan dengan struktur baru):
-        {{
-            "gambaran_umum": "Paragraf panjang tentang kondisi umum wilayah dan KPM...\\nParagraf kedua tentang situasi spesifik...",
-            "maksud_tujuan": "Paragraf gabungan yang menjelaskan maksud dan tujuan kegiatan secara mengalir...",
-            "ruang_lingkup": "Jelaskan ruang lingkup wilayah (Desa/Kecamatan) dan sasaran KPM...",
-            "dasar_hukum": ["Permensos No. 1 Tahun 2018", "Pedoman Umum PKH 2021", "Surat Keputusan terkait"],
-            "kegiatan": ["Uraian kegiatan 1 secara detail dan deskriptif (naratif)...", "Detail tentang {ket_info}..."],
-            "hasil": ["Hasil 1...", "Hasil 2...", "Hasil 3..."],
-            "kesimpulan": "Paragraf kesimpulan...",
-            "saran": ["Saran 1...", "Saran 2..."],
-            "penutup": "Kalimat penutup formal laporan..."
-        }}
-        """
-        
-        for attempt in range(max_retries):
+        prompt = f"""Role: Pendamping PKH. Buat JSON Laporan. KONTEKS: RHK: {topik}, Kegiatan: {detail}, Lokasi: {lokasi_lengkap}, Periode: {bulan}, Catatan: {ket_info}.
+        Output JSON Wajib (lowercase key): {{ "gambaran_umum": "...", "maksud_tujuan": "...", "ruang_lingkup": "...", "dasar_hukum": ["..."], "kegiatan": ["..."], "hasil": ["..."], "kesimpulan": "...", "saran": ["..."], "penutup": "..." }}"""
+        for i in range(max_retries):
             try:
-                response = model.generate_content(prompt)
-                import json
-                return json.loads(response.text.replace("```json", "").replace("```", "").strip())
-            except Exception as e:
-                if attempt < max_retries - 1: time.sleep(2); continue
-                else: return None
+                res = model.generate_content(prompt); txt = res.text
+                cln = txt.replace("```json", "").replace("```", "").strip()
+                try: return json.loads(cln)
+                except:
+                    m = re.search(r'\{.*\}', txt, re.DOTALL)
+                    if m: return json.loads(m.group())
+            except: 
+                if i < max_retries - 1: time.sleep(2); continue
+                return None
+        return None
 
-    # --- WORD (FORMAT CUSTOM + FIRST LINE INDENT) ---
     def create_word_doc(data, meta, imgs, kop, ttd, extra_info=None, kpm_data=None):
-        doc = Document()
+        doc = Document(); 
         for s in doc.sections: s.top_margin=Cm(2); s.bottom_margin=Cm(2); s.left_margin=Cm(2.5); s.right_margin=Cm(2.5)
         style = doc.styles['Normal']; style.font.name = 'Times New Roman'; style.font.size = Pt(12)
+        if kop: p=doc.add_paragraph(); p.alignment=1; p.add_run().add_picture(io.BytesIO(kop), width=Inches(6.2))
         
-        if kop: 
-            p = doc.add_paragraph(); p.alignment = 1
-            p.add_run().add_picture(io.BytesIO(kop), width=Inches(6.2))
-        
-        # JUDUL BAKU
-        doc.add_paragraph(" ")
-        p = doc.add_paragraph(); p.alignment = 1
-        # HARDCODED: LAPORAN TENTANG [JUDUL DARI INPUTAN]
-        run = p.add_run(f"LAPORAN\nTENTANG\n{meta['judul'].upper()}\n{meta['bulan'].upper()}")
-        run.bold = True; run.font.size = Pt(14)
+        doc.add_paragraph(" "); p=doc.add_paragraph(); p.alignment=1
+        run=p.add_run(f"LAPORAN\nTENTANG\n{meta['judul'].upper()}\n{meta['bulan'].upper()}"); run.bold=True; run.font.size=Pt(14)
         doc.add_paragraph(" ")
 
-        def add_p_indent(text, bold=False):
-            safe_text = safe_str(text)
-            paragraphs = safe_text.split('\n')
-            for p_text in paragraphs:
-                if p_text.strip():
-                    p = doc.add_paragraph()
-                    p.paragraph_format.first_line_indent = Cm(1.27) 
-                    p.paragraph_format.left_indent = Cm(0) 
-                    p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-                    run = p.add_run(p_text.strip())
-                    if bold: run.bold = True
-
-        def add_numbered_item(number, text):
-            p = doc.add_paragraph()
-            p.paragraph_format.left_indent = Cm(0.75) 
-            p.paragraph_format.first_line_indent = Cm(-0.75) 
-            p.add_run(f"{number}.\t{safe_str(text)}") 
+        def add_p(t):
+            for x in safe_str(t).split('\n'):
+                if x.strip(): p=doc.add_paragraph(); p.paragraph_format.first_line_indent=Cm(1.27); p.alignment=WD_ALIGN_PARAGRAPH.JUSTIFY; p.add_run(x.strip())
 
         doc.add_paragraph("A. Pendahuluan", style='Heading 1')
-        
-        doc.add_paragraph("1. Gambaran Umum", style='Heading 2')
-        add_p_indent(f"Lokasi Pelaksanaan: Kelurahan {meta['kel']}, Kecamatan {meta['kec']}, {meta['kab']}, {meta['prov']}.")
-        add_p_indent(data.get('gambaran_umum'))
-        
-        doc.add_paragraph("2. Maksud dan Tujuan", style='Heading 2')
-        add_p_indent(data.get('maksud_tujuan'))
-        
-        doc.add_paragraph("3. Ruang Lingkup", style='Heading 2')
-        add_p_indent(data.get('ruang_lingkup'))
-        
+        doc.add_paragraph("1. Gambaran Umum", style='Heading 2'); add_p(f"Lokasi: {meta['kel']}, {meta['kec']}, {meta['kab']}."); add_p(data.get('gambaran_umum'))
+        doc.add_paragraph("2. Maksud dan Tujuan", style='Heading 2'); add_p(data.get('maksud_tujuan'))
+        doc.add_paragraph("3. Ruang Lingkup", style='Heading 2'); add_p(data.get('ruang_lingkup'))
         doc.add_paragraph("4. Dasar", style='Heading 2')
-        for i, item in enumerate(data.get('dasar_hukum', []), 1): add_numbered_item(i, item)
+        for i,x in enumerate(data.get('dasar_hukum', []),1): p=doc.add_paragraph(); p.paragraph_format.left_indent=Cm(0.75); p.paragraph_format.first_line_indent=Cm(-0.75); p.add_run(f"{i}.\t{safe_str(x)}")
 
-        doc.add_paragraph("B. Kegiatan yang dilaksanakan", style='Heading 1')
-        if extra_info and extra_info.get('desc'):
-            p = doc.add_paragraph(f"Fokus Kegiatan: {extra_info['desc']}"); p.paragraph_format.left_indent = Cm(0.5); p.runs[0].italic = True
-            
-        for item in data.get('kegiatan', []):
-            clean = safe_str(item).replace('\n', ' ')
-            add_p_indent(clean)
+        doc.add_paragraph("B. Kegiatan", style='Heading 1')
+        if extra_info and extra_info.get('desc'): p=doc.add_paragraph(f"Fokus: {extra_info['desc']}"); p.runs[0].italic=True
+        for x in data.get('kegiatan', []): add_p(safe_str(x).replace('\n', ' '))
 
-        doc.add_paragraph("C. Hasil yang dicapai", style='Heading 1')
+        doc.add_paragraph("C. Hasil", style='Heading 1')
         if kpm_data and isinstance(kpm_data, dict):
-            doc.add_paragraph(f"Profil KPM: {kpm_data.get('Nama')} (NIK: {kpm_data.get('NIK')})")
-            
-        for i, item in enumerate(data.get('hasil', []), 1): add_numbered_item(i, item)
+            p=doc.add_paragraph(); p.add_run("Profil KPM:").bold=True
+            tbl=doc.add_table(rows=0, cols=3); tbl.autofit=False; tbl.columns[0].width=Cm(5.5); tbl.columns[1].width=Cm(0.5); tbl.columns[2].width=Cm(10.0)
+            fields = [("Nama", kpm_data.get('Nama', '-')), ("NIK", kpm_data.get('NIK', '-')), ("Alamat", kpm_data.get('Alamat', '-')), ("Kategori", kpm_data.get('Kategori', '-')), ("Status", kpm_data.get('Status', '-')), ("Jenis Graduasi", kpm_data.get('Jenis Graduasi', '-')), ("Tahun Bergabung", kpm_data.get('Tahun Bergabung', '-')), ("Anggota", kpm_data.get('Jumlah Anggota', '-')), ("Alasan", kpm_data.get('Alasan', '-'))]
+            for l,v in fields: r=tbl.add_row().cells; r[0].text=l; r[1].text=":"; r[2].text=str(v)
+            doc.add_paragraph(" ")
+        for i,x in enumerate(data.get('hasil', []),1): p=doc.add_paragraph(); p.paragraph_format.left_indent=Cm(0.75); p.paragraph_format.first_line_indent=Cm(-0.75); p.add_run(f"{i}.\t{safe_str(x)}")
 
-        doc.add_paragraph("D. Kesimpulan dan Saran", style='Heading 1')
-        add_p_indent(data.get('kesimpulan'))
-        doc.add_paragraph("Adapun yang dapat kami sarankan sebagai berikut:")
-        for item in data.get('saran', []):
-            p = doc.add_paragraph(f"- {safe_str(item)}")
-            p.paragraph_format.left_indent = Cm(1.0)
-
-        doc.add_paragraph("E. Penutup", style='Heading 1')
-        add_p_indent(data.get('penutup'))
+        doc.add_paragraph("D. Penutup", style='Heading 1'); add_p(data.get('kesimpulan')); add_p(data.get('penutup'))
         doc.add_paragraph(" "); doc.add_paragraph(" ")
+        
+        tbl=doc.add_table(rows=1, cols=2); tbl.autofit=False; tbl.columns[0].width=Inches(3.5); tbl.columns[1].width=Inches(3.0)
+        c=tbl.cell(0,1); p=c.paragraphs[0]; p.alignment=1
+        p.add_run(f"Dibuat di {meta['kab']}\nPada Tanggal {meta['tgl']}\nPendamping PKH\n")
+        if ttd: p.add_run().add_picture(io.BytesIO(ttd), height=Inches(0.8)); p.add_run("\n")
+        else: p.add_run("\n\n\n")
+        p.add_run(f"\n{meta['nama']}\n").bold=True; p.add_run(f"NIP. {meta['nip']}")
 
-        table = doc.add_table(rows=1, cols=2)
-        table.autofit = False
-        table.columns[0].width = Inches(3.5)
-        table.columns[1].width = Inches(3.0)
-        cell_kanan = table.cell(0, 1)
-        p_ttd = cell_kanan.paragraphs[0]; p_ttd.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        
-        p_ttd.add_run(f"Dibuat di {meta['kab']}\n")
-        p_ttd.add_run(f"Pada Tanggal {meta['tgl']}\n")
-        p_ttd.add_run(f"Pendamping PKH / Layanan Operasional\n")
-        
-        if ttd:
-            p_ttd.add_run().add_picture(io.BytesIO(ttd), height=Inches(0.8)); p_ttd.add_run("\n")
-        else: p_ttd.add_run("\n\n\n")
-        
-        p_ttd.add_run(f"\n{meta['nama']}\n").bold = True
-        p_ttd.add_run(f"NIP. {meta['nip']}")
-
-        doc.add_page_break()
-        p_lamp = doc.add_paragraph("LAMPIRAN DOKUMENTASI"); p_lamp.alignment = 1; p_lamp.runs[0].bold = True
-        doc.add_paragraph(" ")
-        
+        doc.add_page_break(); p=doc.add_paragraph("DOKUMENTASI"); p.alignment=1; p.runs[0].bold=True; doc.add_paragraph(" ")
         if imgs:
-            rows = (len(imgs) + 1) // 2
-            tbl_img = doc.add_table(rows=rows, cols=2); tbl_img.autofit = True
-            for i, img_data in enumerate(imgs):
-                try:
-                    row_idx = i // 2; col_idx = i % 2
-                    cell = tbl_img.cell(row_idx, col_idx)
-                    p_img = cell.paragraphs[0]; p_img.alignment = 1
-                    img_data.seek(0); img_comp = compress_image(img_data)
-                    p_img.add_run().add_picture(img_comp, width=Inches(2.8))
-                    p_img.add_run(f"\n{meta['judul']} - Foto {i+1}")
+            rt=doc.add_table(rows=(len(imgs)+1)//2, cols=2); rt.autofit=True
+            for i,im in enumerate(imgs):
+                try: 
+                    cl=rt.cell(i//2, i%2); p=cl.paragraphs[0]; p.alignment=1
+                    im.seek(0); p.add_run().add_picture(compress_image(im), width=Inches(2.8)); p.add_run(f"\nFoto {i+1}")
                 except: pass
-                
-        bio = io.BytesIO(); doc.save(bio); return bio
+        
+        bio=io.BytesIO(); doc.save(bio); return bio
 
-    # --- PDF (FORMAT CUSTOM + SIMULASI INDENT) ---
     def create_pdf_doc(data, meta, imgs, kop, ttd, extra_info=None, kpm_data=None):
         pdf = FPDF(); pdf.set_margins(25, 20, 25); pdf.add_page(); pdf.set_font("Times", size=12)
-        def J(txt): pdf.multi_cell(0, 6, clean_text_for_pdf(txt), align='J')
-        def TXT(s): return clean_text_for_pdf(s)
-        def J_indent(txt): pdf.multi_cell(0, 6, "        " + clean_text_for_pdf(txt), align='J')
-
+        def J(t): pdf.multi_cell(0, 6, clean_text_for_pdf(t), align='J')
+        def JI(t): pdf.multi_cell(0, 6, "        "+clean_text_for_pdf(t), align='J')
+        
         if kop:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp: tmp.write(kop); pth=tmp.name
-            pdf.image(pth, x=10, y=10, w=190); os.unlink(pth); pdf.ln(35)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp: tmp.write(kop); pdf.image(tmp.name, 10, 10, 190); os.unlink(tmp.name); pdf.ln(35)
         else: pdf.ln(10)
 
-        pdf.set_font("Times", "B", 14)
-        pdf.cell(0, 6, "LAPORAN", ln=True, align='C')
-        pdf.cell(0, 6, "TENTANG", ln=True, align='C')
-        pdf.cell(0, 6, TXT(meta['judul'].upper()), ln=True, align='C')
-        pdf.cell(0, 6, TXT(meta['bulan'].upper()), ln=True, align='C'); pdf.ln(10)
+        pdf.set_font("Times", "B", 14); pdf.cell(0,6,"LAPORAN",0,1,'C'); pdf.cell(0,6,"TENTANG",0,1,'C')
+        pdf.cell(0,6, clean_text_for_pdf(meta['judul'].upper()),0,1,'C'); pdf.cell(0,6, clean_text_for_pdf(meta['bulan'].upper()),0,1,'C'); pdf.ln(10)
 
-        pdf.set_font("Times", "B", 12); pdf.cell(0, 8, "A. Pendahuluan", ln=True)
-        pdf.set_font("Times", "B", 12); pdf.cell(0, 6, "1. Gambaran Umum", ln=True)
-        pdf.set_font("Times", "", 12); J_indent(f"Lokasi Pelaksanaan: Kelurahan {meta['kel']}, Kecamatan {meta['kec']}, {meta['kab']}, {meta['prov']}.")
-        J_indent(safe_str(data.get('gambaran_umum')))
+        pdf.set_font("Times", "B", 12); pdf.cell(0,8,"A. Pendahuluan",0,1)
+        pdf.cell(0,6,"1. Gambaran Umum",0,1); pdf.set_font("Times","",12); JI(f"Lokasi: {meta['kel']}, {meta['kec']}, {meta['kab']}."); JI(data.get('gambaran_umum'))
         
-        pdf.set_font("Times", "B", 12); pdf.cell(0, 6, "2. Maksud dan Tujuan", ln=True)
-        pdf.set_font("Times", "", 12); J_indent(safe_str(data.get('maksud_tujuan')))
-        
-        pdf.set_font("Times", "B", 12); pdf.cell(0, 6, "3. Ruang Lingkup", ln=True)
-        pdf.set_font("Times", "", 12); J_indent(safe_str(data.get('ruang_lingkup')))
-        
-        pdf.set_font("Times", "B", 12); pdf.cell(0, 6, "4. Dasar", ln=True)
-        pdf.set_font("Times", "", 12)
-        for i, item in enumerate(data.get('dasar_hukum', []), 1):
-            pdf.cell(10, 6, f"{i}.", 0, 0); pdf.multi_cell(0, 6, TXT(item))
+        pdf.set_font("Times", "B", 12); pdf.cell(0,6,"2. Maksud Tujuan",0,1); pdf.set_font("Times","",12); JI(data.get('maksud_tujuan'))
+        pdf.set_font("Times", "B", 12); pdf.cell(0,6,"3. Dasar",0,1); pdf.set_font("Times","",12)
+        for i,x in enumerate(data.get('dasar_hukum', []),1): pdf.cell(10,6,f"{i}.",0,0); pdf.multi_cell(0,6,clean_text_for_pdf(x))
 
-        pdf.ln(4); pdf.set_font("Times", "B", 12); pdf.cell(0, 8, "B. Kegiatan yang dilaksanakan", ln=True)
-        pdf.set_font("Times", "", 12)
-        if extra_info and extra_info.get('desc'):
-            pdf.set_font("Times", "I", 12); J(f"Fokus Kegiatan: {extra_info['desc']}"); pdf.set_font("Times", "", 12)
-        for item in data.get('kegiatan', []):
-            J_indent(safe_str(item).replace('\n', ' ')); pdf.ln(2)
+        pdf.ln(4); pdf.set_font("Times", "B", 12); pdf.cell(0,8,"B. Kegiatan",0,1); pdf.set_font("Times","",12)
+        if extra_info: pdf.set_font("Times","I",12); J(f"Fokus: {extra_info.get('desc')}"); pdf.set_font("Times","",12)
+        for x in data.get('kegiatan', []): JI(x)
 
-        pdf.ln(2); pdf.set_font("Times", "B", 12); pdf.cell(0, 8, "C. Hasil yang dicapai", ln=True)
-        pdf.set_font("Times", "", 12)
+        pdf.ln(2); pdf.set_font("Times", "B", 12); pdf.cell(0,8,"C. Hasil",0,1); pdf.set_font("Times","",12)
         if kpm_data and isinstance(kpm_data, dict):
-            pdf.cell(0, 6, TXT(f"Profil KPM: {kpm_data.get('Nama')} (NIK: {kpm_data.get('NIK')})"), ln=True)
-        for i, item in enumerate(data.get('hasil', []), 1):
-            pdf.cell(10, 6, f"{i}.", 0, 0); pdf.multi_cell(0, 6, TXT(item))
+            fields = [("Nama", kpm_data.get('Nama', '-')), ("NIK", kpm_data.get('NIK', '-')), ("Alamat", kpm_data.get('Alamat', '-')), ("Kategori", kpm_data.get('Kategori', '-')), ("Status", kpm_data.get('Status', '-')), ("Jenis Graduasi", kpm_data.get('Jenis Graduasi', '-')), ("Tahun Bergabung", kpm_data.get('Tahun Bergabung', '-')), ("Anggota", kpm_data.get('Jumlah Anggota', '-')), ("Alasan", kpm_data.get('Alasan', '-'))]
+            for l,v in fields: pdf.cell(50,6,clean_text_for_pdf(l),0,0); pdf.cell(5,6,":",0,0); pdf.multi_cell(0,6,clean_text_for_pdf(str(v)),0,1)
+            pdf.ln(2)
+        for i,x in enumerate(data.get('hasil', []),1): pdf.cell(10,6,f"{i}.",0,0); pdf.multi_cell(0,6,clean_text_for_pdf(x))
 
-        pdf.ln(4); pdf.set_font("Times", "B", 12); pdf.cell(0, 8, "D. Kesimpulan dan Saran", ln=True)
-        pdf.set_font("Times", "", 12)
-        J_indent(safe_str(data.get('kesimpulan')))
-        pdf.cell(0, 6, "Adapun saran kami:", ln=True)
-        for item in data.get('saran', []):
-            pdf.cell(10, 6, "-", 0, 0); pdf.multi_cell(0, 6, TXT(item))
-
-        pdf.ln(4); pdf.set_font("Times", "B", 12); pdf.cell(0, 8, "E. Penutup", ln=True)
-        pdf.set_font("Times", "", 12); J_indent(safe_str(data.get('penutup')))
-
-        pdf.ln(10); start_x = 110; pdf.set_x(start_x)
-        pdf.cell(80, 5, TXT(f"Dibuat di {meta['kab']}"), ln=True, align='C')
-        pdf.set_x(start_x); pdf.cell(80, 5, TXT(f"Pada Tanggal {meta['tgl']}"), ln=True, align='C')
-        pdf.set_x(start_x); pdf.cell(80, 5, "Pendamping PKH", ln=True, align='C')
+        pdf.ln(4); pdf.set_font("Times", "B", 12); pdf.cell(0,8,"D. Penutup",0,1); pdf.set_font("Times","",12); JI(data.get('penutup'))
         
+        pdf.ln(10); x=110; pdf.set_x(x); pdf.cell(80,5,f"Dibuat di {meta['kab']}",0,1,'C')
+        pdf.set_x(x); pdf.cell(80,5,f"Pada {meta['tgl']}",0,1,'C'); pdf.set_x(x); pdf.cell(80,5,"Pendamping PKH",0,1,'C')
         if ttd:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp: tmp.write(ttd); pth=tmp.name
-            pdf.image(pth, x=start_x+25, y=pdf.get_y(), h=25); os.unlink(pth); pdf.ln(25)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp: tmp.write(ttd); pdf.image(tmp.name, x+25, pdf.get_y(), h=25); os.unlink(tmp.name); pdf.ln(25)
         else: pdf.ln(25)
-        
-        pdf.set_x(start_x); pdf.set_font("Times", "B", 12); pdf.cell(80, 5, TXT(meta['nama']), ln=True, align='C')
-        pdf.set_x(start_x); pdf.set_font("Times", "", 12); pdf.cell(80, 5, TXT(f"NIP. {meta['nip']}"), ln=True, align='C')
+        pdf.set_x(x); pdf.set_font("Times","B",12); pdf.cell(80,5,clean_text_for_pdf(meta['nama']),0,1,'C')
+        pdf.set_x(x); pdf.set_font("Times","",12); pdf.cell(80,5,f"NIP. {meta['nip']}",0,1,'C')
 
+        if imgs:
+            pdf.add_page(); pdf.set_font("Times","B",12); pdf.cell(0,10,"DOKUMENTASI",0,1,'C'); pdf.ln(5)
+            for i,im in enumerate(imgs):
+                if i>0 and i%2==0:
+                    pdf.ln(60)
+                    if pdf.get_y()>250: pdf.add_page(); pdf.ln(10)
+                xp=30 if i%2==0 else 120; yp=pdf.get_y()
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+                    im.seek(0); tmp.write(im.read()); tp=tmp.name
+                try: pdf.image(tp, xp, yp, w=70, h=50); pdf.set_xy(xp, yp+52); pdf.set_font("Times","",9); pdf.multi_cell(70,4,f"Foto {i+1}",0,'C'); pdf.set_xy(25, yp)
+                except: pass
+                finally: os.unlink(tp)
         return pdf.output(dest='S').encode('latin-1')
 
     # ==========================================
-    # 5. UI & LOGIKA UTAMA
+    # 8. UI HANDLER
     # ==========================================
-    def update_tanggal_surat():
-        bln = st.session_state.get('bln_val', 'JANUARI')
-        th = st.session_state.get('th_val', '2026')
-        if bln is None: bln = "JANUARI"
-        if th is None: th = "2026"
-        day = "28" if bln == "FEBRUARI" else "30"
-        st.session_state.tgl_val = f"{day} {bln.title()} {th}"
+    def update_tgl():
+        d="28" if st.session_state.bln_val=="FEBRUARI" else "30"
+        st.session_state.tgl_val = f"{d} {st.session_state.bln_val.title()} {st.session_state.th_val}"
 
     def render_sidebar():
-        u_nama, u_nip, u_kpm, u_prov, u_kab, u_kec, u_kel = get_user_settings()
-
+        set_data = get_user_settings()
         st.sidebar.header("👤 Profil Pendamping")
-        nama = st.sidebar.text_input("Nama Lengkap", u_nama, key="nama_val")
-        nip = st.sidebar.text_input("NIP", u_nip, key="nip_val")
-        kpm = st.sidebar.number_input("Total KPM Dampingan", min_value=0, value=u_kpm, key="kpm_global_val")
-        
+        nm = st.sidebar.text_input("Nama", set_data[0], key="nama_val")
+        nip = st.sidebar.text_input("NIP", set_data[1], key="nip_val")
+        kpm = st.sidebar.number_input("Jml KPM", value=set_data[2], key="kpm_global_val")
         st.sidebar.markdown("### 🌍 Wilayah")
-        prov = st.sidebar.text_input("Provinsi", u_prov, key="prov_val")
-        kab = st.sidebar.text_input("Kabupaten", u_kab, key="kab_val")
-        kec = st.sidebar.text_input("Kecamatan", u_kec, key="kec_val")
-        kel = st.sidebar.text_input("Kelurahan", u_kel, key="kel_val")
+        prov = st.sidebar.text_input("Provinsi", set_data[3], key="prov_val")
+        kab = st.sidebar.text_input("Kabupaten", set_data[4], key="kab_val")
+        kec = st.sidebar.text_input("Kecamatan", set_data[5], key="kec_val")
+        kel = st.sidebar.text_input("Kelurahan", set_data[6], key="kel_val")
         
         st.sidebar.markdown("### 📅 Periode")
         c1, c2 = st.sidebar.columns([1, 1.5])
-        with c1:
-            if 'th_val' not in st.session_state: st.session_state['th_val'] = "2026"
-            st.selectbox("Tahun", ["2026", "2027"], key="th_val", on_change=update_tanggal_surat)
-        with c2:
-            BULAN = ["JANUARI", "FEBRUARI", "MARET", "APRIL", "MEI", "JUNI", 
-                     "JULI", "AGUSTUS", "SEPTEMBER", "OKTOBER", "NOVEMBER", "DESEMBER"]
-            if 'bln_val' not in st.session_state: st.session_state['bln_val'] = "JANUARI"
-            st.selectbox("Bulan", BULAN, key="bln_val", on_change=update_tanggal_surat)
-        
-        if 'tgl_val' not in st.session_state: update_tanggal_surat()
+        with c1: st.selectbox("Tahun", ["2026", "2027"], key="th_val", on_change=update_tgl)
+        with c2: st.selectbox("Bulan", ["JANUARI", "FEBRUARI", "MARET", "APRIL", "MEI", "JUNI", "JULI", "AGUSTUS", "SEPTEMBER", "OKTOBER", "NOVEMBER", "DESEMBER"], key="bln_val", on_change=update_tgl)
         st.sidebar.text_input("Tanggal Surat", key="tgl_val")
         
-        st.sidebar.markdown("---")
-        jml_foto = count_archived_photos()
-        st.sidebar.info(f"📂 **Arsip Foto:** {jml_foto} File")
-        
-        st.sidebar.header("🖼️ Atribut")
-        k = st.sidebar.file_uploader("Kop Surat", type=['png','jpg'])
-        t = st.sidebar.file_uploader("Tanda Tangan", type=['png','jpg'])
-        
+        st.sidebar.markdown("---"); st.sidebar.info(f"📂 Arsip: {count_archived_photos()} Foto")
+        k = st.sidebar.file_uploader("Kop", type=['png','jpg'])
+        t = st.sidebar.file_uploader("TTD", type=['png','jpg'])
         if st.sidebar.button("💾 SIMPAN PROFIL"):
-            save_user_settings(nama, nip, kpm, prov, kab, kec, kel)
+            save_user_settings(nm, nip, kpm, prov, kab, kec, kel)
             if k: st.session_state['kop_bytes'] = k.getvalue()
             if t: st.session_state['ttd_bytes'] = t.getvalue()
-            st.sidebar.success("Profil Tersimpan!")
+            st.sidebar.success("Disimpan!")
 
     def show_dashboard():
-        # CSS: HARD FREEZE HEADER
-        st.markdown("""
-            <style>
-            div[data-testid="stVerticalBlock"] > div:first-child {
-                position: sticky; top: 0; z-index: 9999; background: white; 
-                padding-bottom: 20px; border-bottom: 2px solid #f0f0f0;
-            }
-            div.stButton > button {
-                width: 100%; height: 160px; white-space: pre-wrap;
-                font-size: 15px; font-weight: bold; border-radius: 15px;
-                box-shadow: 0 4px 6px rgba(0,0,0,0.1); transition: all 0.3s;
-                display: flex; flex-direction: column; align-items: center;
-                justify-content: center; text-align: center;
-            }
-            div.stButton > button:hover {
-                transform: translateY(-5px); box-shadow: 0 8px 12px rgba(0,0,0,0.2); border-color: #ff4b4b;
-            }
-            </style>
-        """, unsafe_allow_html=True)
-
-        with st.container():
-            st.title("📂 Aplikasi RHK PKH Pro")
-            st.markdown("### Menu Utama")
-        
-        rhk_keys = list(CONFIG_LAPORAN.keys())
-        cols = st.columns(4)
-        for i, rhk in enumerate(rhk_keys):
-            icon = "📄"
-            if "RHK 1" in rhk: icon = "💸"
-            elif "RHK 2" in rhk: icon = "📚"
-            elif "RHK 3" in rhk: icon = "🎓"
-            elif "RHK 4" in rhk: icon = "📝"
-            elif "RHK 5" in rhk: icon = "👥"
-            elif "RHK 6" in rhk: icon = "🆘"
-            elif "RHK 7" in rhk: icon = "📢"
-            
-            parts = rhk.split("–")
-            rhk_code = parts[0].strip()
-            rhk_title = parts[-1].strip()
-            label = f"{icon}\n{rhk_code}\n{rhk_title}"
-            
+        st.title("📂 Aplikasi RHK PKH Pro"); st.markdown("### Menu Utama")
+        ks = list(CONFIG_LAPORAN.keys()); cols = st.columns(4)
+        for i, k in enumerate(ks):
+            ic = "💸" if "RHK 1" in k else "📚" if "RHK 2" in k else "🎓" if "RHK 3" in k else "📝" if "RHK 4" in k else "👥" if "RHK 5" in k else "🆘" if "RHK 6" in k else "📢"
+            lbl = f"{ic} {k.split('–')[0].strip()}\n\n{k.split('–')[-1].strip()}"
             with cols[i % 4]:
-                if st.button(label, key=f"btn_{i}", use_container_width=True):
-                    st.session_state['selected_rhk'] = rhk
-                    st.session_state['page'] = 'detail'
-                    st.session_state['rhk2_queue'] = []
-                    st.session_state['rhk4_queue'] = []
-                    st.session_state['rhk7_queue'] = []
-                    st.rerun()
-        
-        # FOOTER
-        st.markdown("---")
-        st.markdown(
-            "<div style='text-align: center; color: grey; font-size: 12px;'>"
-            "Copyright © 2026 VHS | All Rights Reserved | Kebijakan Privasi"
-            "</div>",
-            unsafe_allow_html=True
-        )
+                if st.button(lbl, key=f"b_{i}"):
+                    st.session_state['selected_rhk']=k; st.session_state['page']='detail'
+                    st.query_params["page"]="detail"; st.query_params["rhk"]=k; reset_states(); st.rerun()
 
-    def show_detail_page():
-        st.markdown("""
-            <style>
-            div[data-testid="stVerticalBlock"] > div:first-child {
-                position: sticky; top: 0; z-index: 9999; background: white; 
-                padding-top: 15px; padding-bottom: 15px; border-bottom: 2px solid #ddd;
-            }
-            </style>
-        """, unsafe_allow_html=True)
-
-        current_rhk = st.session_state['selected_rhk']
-        
+    def show_detail():
+        cr = st.session_state['selected_rhk']
         with st.container():
-            st.caption("🚀 Navigasi Cepat:")
-            nav_cols = st.columns(8)
-            if nav_cols[0].button("🏠 HOME"):
-                st.session_state['page'] = 'home'; reset_states(); st.rerun()
-            
-            rhk_keys = list(CONFIG_LAPORAN.keys())
-            col_idx = 1
-            for rhk in rhk_keys:
-                if rhk != current_rhk: 
-                    short_name = rhk.split("–")[0].strip()
-                    if col_idx < 8:
-                        if nav_cols[col_idx].button(short_name, key=f"nav_{rhk}"):
-                            st.session_state['selected_rhk'] = rhk; reset_states(); st.rerun()
-                        col_idx += 1
-        
-        st.divider()
-        st.subheader(f"{current_rhk}")
-        
-        # --- LOGIKA DEFAULT JUDUL KOP SURAT (AWALAN KEGIATAN/PELAKSANAAN) ---
-        default_judul = "KEGIATAN"
-        if "RHK 1" in current_rhk: default_judul = "KEGIATAN PENYALURAN BANTUAN SOSIAL"
-        elif "RHK 2" in current_rhk: default_judul = "PELAKSANAAN P2K2 (FDS)"
-        elif "RHK 3" in current_rhk: default_judul = "PELAKSANAAN GRADUASI MANDIRI"
-        elif "RHK 4" in current_rhk: default_judul = "KEGIATAN PEMUTAKHIRAN DATA"
-        elif "RHK 5" in current_rhk: default_judul = "KEGIATAN PEMUTAKHIRAN DATA KPM"
-        elif "RHK 6" in current_rhk: default_judul = "PENANGANAN KASUS (CASE MANAGEMENT)"
-        elif "RHK 7" in current_rhk: default_judul = "PELAKSANAAN TUGAS DIREKTIF"
-        
-        # FITUR JUDUL BISA DIEDIT BEBAS
-        judul_kop = st.text_input("Judul Kop Laporan (Bisa Diedit):", value=default_judul)
-        
-        st.divider()
+            nc = st.columns(8)
+            if nc[0].button("🏠 HOME"):
+                st.session_state['page']='home'; st.query_params["page"]="home"
+                if "rhk" in st.query_params: del st.query_params["rhk"]
+                reset_states(); st.rerun()
+            for i, k in enumerate(CONFIG_LAPORAN.keys()):
+                if k!=cr and i+1<8:
+                    if nc[i+1].button(k.split('–')[0].strip(), key=f"n_{k}"):
+                        st.session_state['selected_rhk']=k; st.query_params["rhk"]=k; reset_states(); st.rerun()
 
-        b = st.session_state.get('bln_val', 'JANUARI')
-        t = st.session_state.get('th_val', '2026')
-        periode_gabungan = f"{b} {t}"
-
+        st.divider(); st.subheader(cr)
+        def_jud = "KEGIATAN PENYALURAN" if "RHK 1" in cr else "P2K2 (FDS)" if "RHK 2" in cr else "GRADUASI MANDIRI" if "RHK 3" in cr else "PEMUTAKHIRAN DATA" if "RHK 4" in cr else "PEMUTAKHIRAN DATA KPM" if "RHK 5" in cr else "PENANGANAN KASUS" if "RHK 6" in cr else "TUGAS DIREKTIF"
+        jk = st.text_input("Judul Kop (Edit):", value=def_jud); st.divider()
+        
         meta = {
-            'bulan': periode_gabungan,
-            'kpm': st.session_state['kpm_global_val'],
-            'nama': st.session_state['nama_val'], 'nip': st.session_state['nip_val'],
-            'prov': st.session_state['prov_val'], 'kab': st.session_state['kab_val'],
-            'kec': st.session_state['kec_val'], 'kel': st.session_state['kel_val'],
-            'tgl': st.session_state['tgl_val'],
-            'judul': judul_kop # Menggunakan judul dari inputan
+            'bulan': f"{st.session_state.bln_val} {st.session_state.th_val}",
+            'kpm': st.session_state.kpm_global_val, 'nama': st.session_state.nama_val, 'nip': st.session_state.nip_val,
+            'prov': st.session_state.prov_val, 'kab': st.session_state.kab_val, 'kec': st.session_state.kec_val, 'kel': st.session_state.kel_val,
+            'tgl': st.session_state.tgl_val, 'judul': jk
         }
-        lokasi_lengkap = f"Desa/Kel {meta['kel']}, Kec. {meta['kec']}, {meta['kab']}, {meta['prov']}"
-        kop = st.session_state['kop_bytes']; ttd = st.session_state['ttd_bytes']
+        loc = f"Desa {meta['kel']}, Kec. {meta['kec']}, {meta['kab']}"
+        kop = st.session_state.kop_bytes; ttd = st.session_state.ttd_bytes
 
-        is_rhk3 = (current_rhk == "RHK 3 – TARGET GRADUASI MANDIRI")
-        is_rhk2 = (current_rhk == "RHK 2 – LAPORAN P2K2 (FDS)")
-        is_rhk4 = (current_rhk == "RHK 4 – KEGIATAN PEMUTAKHIRAN")
-        is_rhk7 = (current_rhk == "RHK 7 – LAPORAN DIREKTIF")
-        is_rhk1 = (current_rhk == "RHK 1 – LAPORAN PENYALURAN")
-        is_rhk5 = (current_rhk == "RHK 5 – KPM YANG DIMUTAKHIRKAN")
-        is_rhk6 = (current_rhk == "RHK 6 – LAPORAN KASUS ADAPTIF")
-        
-        def render_photo_manager(key_suffix):
-            st.write("#### 📸 Dokumentasi Kegiatan")
-            tab_up, tab_arsip = st.tabs(["📤 Upload Baru", "🗂️ Ambil dari Arsip"])
-            selected_photos = []
-            new_uploads = None
-            
-            with tab_up:
-                new_uploads = st.file_uploader("Pilih File Foto", type=['jpg','png','jpeg'], accept_multiple_files=True, key=f"up_{key_suffix}")
-                if new_uploads:
-                    for f in new_uploads: selected_photos.append(io.BytesIO(f.getvalue()))
-            
-            with tab_arsip:
-                saved_files = get_archived_photos(current_rhk, meta['bulan'])
-                if not saved_files: st.info(f"Belum ada foto di arsip {meta['bulan']}.")
-                else:
-                    selected_names = st.multiselect("Pilih Foto Lama:", saved_files, key=f"ms_{key_suffix}")
-                    for name in selected_names:
-                        selected_photos.append(load_photo_from_disk(current_rhk, meta['bulan'], name))
-            return selected_photos, new_uploads
+        def phot_man(suf):
+            st.write("#### 📸 Dokumentasi")
+            t1, t2 = st.tabs(["📤 Upload", "🗂️ Arsip"]); sel=[]
+            with t1: 
+                up = st.file_uploader("File Foto", type=['jpg','png'], accept_multiple_files=True, key=f"u_{suf}")
+                if up: sel=[io.BytesIO(f.getvalue()) for f in up]
+            with t2:
+                sv = get_archived_photos(cr, meta['bulan'])
+                if sv: 
+                    for x in st.multiselect("Pilih Arsip:", sv, key=f"m_{suf}"): sel.append(load_photo_from_disk(cr, meta['bulan'], x))
+                else: st.info("Kosong")
+            return sel, up
 
-        # --- RHK 3 ---
-        if is_rhk3:
-            st.info("ℹ️ RHK 3: Pilih KPM dari Excel.")
-            template_df = pd.DataFrame({"Nama": ["ARJO"], "NIK": ["123"], "Alamat": ["Dusun A"], "Kategori": ["Sejahtera"], "Status":["Graduasi"], "Alasan":["Mampu"]})
-            st.download_button("📥 Template Excel", template_df.to_csv(index=False).encode('utf-8'), "template.csv", "text/csv")
+        if "RHK 3" in cr:
+            st.info("ℹ️ RHK 3: Pakai Excel.")
+            td = pd.DataFrame({"Nama":["A"], "NIK":["123"], "Alamat":["B"], "Kategori":["S"], "Status":["L"], "Jenis Graduasi":["S"], "Tahun Bergabung":["2018"], "Jumlah Anggota":["4"], "Alasan":["M"]})
+            b=io.BytesIO(); td.to_excel(b, index=False); b.seek(0)
+            st.download_button("📥 Template XLSX", b, "template.xlsx")
             
-            upl_grad = st.file_uploader("Upload Excel Graduasi", type=['xlsx', 'csv'])
-            if upl_grad:
-                try:
-                    if upl_grad.name.endswith('.csv'): df = pd.read_csv(upl_grad)
-                    else: df = pd.read_excel(upl_grad)
-                    st.session_state['graduasi_raw'] = df
-                except: st.error("Gagal baca.")
+            up = st.file_uploader("Upload Excel", type=['xlsx'])
+            if up: st.session_state['graduasi_raw'] = pd.read_excel(up)
             
-            df_raw = st.session_state['graduasi_raw']
-            if df_raw is not None:
-                if 'Pilih' not in df_raw.columns: df_raw.insert(0, "Pilih", False)
-                edited_df = st.data_editor(df_raw, num_rows="dynamic", use_container_width=True)
-                if st.button("💾 Simpan Pilihan KPM"):
-                    selected = edited_df[edited_df['Pilih'] == True].to_dict('records')
-                    st.session_state['graduasi_fix'] = selected
-                    st.success(f"Disimpan: {len(selected)} KPM")
+            if st.session_state['graduasi_raw'] is not None:
+                df = st.session_state['graduasi_raw']; 
+                if 'Pilih' not in df.columns: df.insert(0, "Pilih", False)
+                ed = st.data_editor(df, num_rows="dynamic", use_container_width=True)
+                if st.button("💾 Simpan Pilihan"): st.session_state['graduasi_fix'] = ed[ed['Pilih']==True].to_dict('records'); st.success("Disimpan")
+
+            ket = st.text_area("Keterangan:", height=80); ph, nu = phot_man("3")
+            if st.button("🚀 Generate RHK 3", type="primary"):
+                if nu: [auto_save_photo_local(f, cr, meta['bulan']) for f in nu]
+                kp = st.session_state.get('graduasi_fix', []); res=[]
+                pr = st.progress(0); stt = st.empty()
+                for i, k in enumerate(kp):
+                    nm = str(k.get('Nama', 'KPM')); stt.info(f"Proses: {nm}..."); time.sleep(3)
+                    dt = generate_isi_laporan(cr, f"Graduasi: {nm}", meta['kpm'], nm, meta['bulan'], loc, ket_info=ket)
+                    if dt:
+                        [p.seek(0) for p in ph]; w_io=io.BytesIO(create_word_doc(dt, meta, ph, kop, ttd, {'desc':ket}, k).getvalue()); w_io.seek(0)
+                        p_io=io.BytesIO(create_pdf_doc(dt, meta, ph, kop, ttd, {'desc':ket}, k)); p_io.seek(0)
+                        
+                        # UPLOAD DRIVE
+                        w_link = upload_to_gdrive(w_io, f"Laporan_{nm}.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+                        p_link = upload_to_gdrive(p_io, f"Laporan_{nm}.pdf", "application/pdf")
+                        
+                        res.append({'nama': nm, 'word': w_io.getvalue(), 'pdf': p_io.getvalue(), 'link': w_link})
+                    pr.progress((i+1)/len(kp))
+                st.session_state['rhk3_results'] = res; st.success("Selesai!"); st.rerun()
             
-            # REVISI: Pastikan label bertuliskan (Opsional)
-            ket_global = st.text_area("Keterangan Tambahan (Opsional):", placeholder="Contoh: Graduasi mandiri...", height=80)
-            final_photos, new_uploads = render_photo_manager("rhk3")
-
-            if st.button("🚀 Buat Laporan Graduasi", type="primary", use_container_width=True):
-                if new_uploads: 
-                    for f in new_uploads: auto_save_photo_local(f, current_rhk, meta['bulan'])
-
-                kpms = st.session_state.get('graduasi_fix', [])
-                if not kpms: st.error("Pilih KPM dulu!"); st.stop()
-                results = []
-                progress = st.progress(0); status = st.empty()
-                
-                for i, kpm in enumerate(kpms):
-                    nama_kpm = str(kpm.get('Nama', 'KPM'))
-                    status.text(f"⏳ Memproses ({i+1}/{len(kpms)}): {nama_kpm}...")
-                    
-                    data_isi = generate_isi_laporan(current_rhk, f"Laporan Graduasi: {nama_kpm}", meta['kpm'], nama_kpm, meta['bulan'], lokasi_lengkap, ket_info=ket_global)
-                    
-                    if data_isi:
-                        extra_info = {'desc': f"KPM: {nama_kpm}. {ket_global}"}
-                        for fp in final_photos: fp.seek(0)
-                        w = create_word_doc(data_isi, meta, final_photos, kop, ttd, extra_info, kpm)
-                        for fp in final_photos: fp.seek(0)
-                        p = create_pdf_doc(data_isi, meta, final_photos, kop, ttd, extra_info, kpm)
-                        results.append({'nama': nama_kpm, 'word': w.getvalue(), 'pdf': p})
-                    progress.progress((i+1)/len(kpms))
-                
-                st.session_state['rhk3_results'] = results
-                st.success("Selesai!"); st.rerun()
-
             if st.session_state.get('rhk3_results'):
-                st.divider(); st.write("### 📥 Download Laporan:")
-                for i, res in enumerate(st.session_state['rhk3_results']):
-                    c1, c2, c3 = st.columns([3,1,1])
-                    c1.write(f"📄 **{res['nama']}**")
-                    c2.download_button("⬇️ Word", res['word'], f"Laporan_{res['nama']}.docx", key=f"w3_{i}")
-                    c3.download_button("⬇️ PDF", res['pdf'], f"Laporan_{res['nama']}.pdf", key=f"p3_{i}")
-                    st.write("---")
+                for i, r in enumerate(st.session_state['rhk3_results']):
+                    c1,c2,c3=st.columns([3,1,1]); c1.write(f"📄 **{r['nama']}**")
+                    c2.download_button("Word", r['word'], f"{r['nama']}.docx", key=f"w{i}")
+                    c3.download_button("PDF", r['pdf'], f"{r['nama']}.pdf", key=f"p{i}")
+                    if r.get('link'): st.caption(f"🔗 [Lihat di Drive]({r['link']})")
 
-        elif is_rhk2 or is_rhk4 or is_rhk7:
-            if is_rhk2: current_queue_key = 'rhk2_queue'; current_results_key = 'rhk2_results'
-            elif is_rhk4: current_queue_key = 'rhk4_queue'; current_results_key = 'rhk4_results'
-            else: current_queue_key = 'rhk7_queue'; current_results_key = 'rhk7_results'
-            
-            info_text = "RHK 2: Modul" if is_rhk2 else ("RHK 4: Jenis Pemutakhiran" if is_rhk4 else "RHK 7: Kegiatan Direktif")
-            st.info(f"ℹ️ {info_text} -> Isi Detail -> Upload/Pilih Foto -> Antrikan.")
+        elif cr in ["RHK 2 – LAPORAN P2K2 (FDS)", "RHK 4 – KEGIATAN PEMUTAKHIRAN", "RHK 7 – LAPORAN DIREKTIF"]:
+            qk = 'rhk2_queue' if "RHK 2" in cr else 'rhk4_queue' if "RHK 4" in cr else 'rhk7_queue'
+            rk = 'rhk2_results' if "RHK 2" in cr else 'rhk4_results' if "RHK 4" in cr else 'rhk7_results'
             
             with st.container(border=True):
-                st.write("#### ➕ Tambah ke Antrian")
-                if is_rhk7:
-                    modul_pilihan = st.text_input("Nama Kegiatan Direktif:", placeholder="Contoh: Rapat Koordinasi Kecamatan")
-                else:
-                    modul_pilihan = st.selectbox("Pilih Laporan:", CONFIG_LAPORAN[current_rhk])
-                
-                app_pilihan = ""
-                if is_rhk4: app_pilihan = st.selectbox("Aplikasi Digunakan:", ["SIKS-NG", "ESDM-PKH", "SIKMA Mobile"])
-                
-                # REVISI: Pastikan label bertuliskan (Opsional)
-                ket_tambahan = st.text_area("Keterangan Tambahan (Opsional):", placeholder="Contoh: Kegiatan berjalan lancar...", height=80)
-                
-                final_photos, new_uploads = render_photo_manager("queue_rhk")
-                
-                if st.button("Simpan ke Antrian"):
-                    if not final_photos: st.error("Wajib ada foto (Upload Baru atau Dari Arsip)!")
-                    elif (is_rhk7 and not modul_pilihan): st.error("Wajib isi nama kegiatan!")
+                st.write("#### ➕ Antrian")
+                md = st.text_input("Kegiatan:") if "RHK 7" in cr else st.selectbox("Modul:", CONFIG_LAPORAN[cr])
+                ap = st.selectbox("App:", ["SIKS-NG", "ESDM", "SIKMA"]) if "RHK 4" in cr else ""
+                kt = st.text_area("Ket:", height=80); ph, nu = phot_man("q")
+                if st.button("Masuk Antrian"):
+                    if not ph: st.error("Foto Wajib!")
                     else:
-                        if new_uploads:
-                            for f in new_uploads: auto_save_photo_local(f, current_rhk, meta['bulan'])
-                        
-                        entry = {
-                            "modul": modul_pilihan, "foto": final_photos, "foto_count": len(final_photos),
-                            "app": app_pilihan, "desc": ket_tambahan
-                        }
-                        st.session_state[current_queue_key].append(entry)
-                        st.success(f"Berhasil ditambahkan: {modul_pilihan}")
-                        time.sleep(0.5); st.rerun()
-
-            queue = st.session_state[current_queue_key]
-            if len(queue) > 0:
-                st.divider()
-                st.write(f"### 📋 Antrian ({len(queue)} Item):")
-                for idx, q in enumerate(queue):
-                    info = f"{idx+1}. **{q['modul']}** | {q['foto_count']} Foto"
-                    if q.get('app'): info += f" | App: {q['app']}"
-                    if q.get('desc'): info += f" | Ket: {q['desc'][:30]}..."
-                    st.write(info)
-                
-                c1, c2 = st.columns(2)
-                if c1.button("🗑️ Hapus Antrian"): st.session_state[current_queue_key] = []; st.rerun()
-                if c2.button("🚀 GENERATE SEMUA", type="primary"):
-                    if GOOGLE_API_KEY == "MASUKKAN_KEY_GOOGLE_ANDA_DISINI": st.error("API Key Kosong!"); st.stop()
-                    
-                    results = []
-                    progress = st.progress(0); status = st.empty()
-                    for i, item in enumerate(queue):
-                        modul_name = item['modul']
-                        status.text(f"⏳ Memproses ({i+1}/{len(queue)}): {modul_name}...")
-                        
-                        detail_kegiatan = f"Nama Kegiatan/Modul: {modul_name}. {item.get('desc', '')}"
-                        
-                        if is_rhk7:
-                            extra_info = {'app': item.get('app'), 'desc': f"{detail_kegiatan} (Laporan Pelaksanaan)"}
-                            data_a = generate_isi_laporan(current_rhk, f"{modul_name} (Pelaksanaan)", meta['kpm'], "Peserta", meta['bulan'], lokasi_lengkap, "", item.get('app'), extra_info['desc'])
-                            if data_a:
-                                for f in item['foto']: f.seek(0)
-                                w = create_word_doc(data_a, meta, item['foto'], kop, ttd, extra_info)
-                                for f in item['foto']: f.seek(0)
-                                p = create_pdf_doc(data_a, meta, item['foto'], kop, ttd, extra_info)
-                                results.append({'nama': f"{modul_name} - Pelaksanaan (A)", 'word': w.getvalue(), 'pdf': p})
-
-                            extra_info_b = {'app': item.get('app'), 'desc': f"{detail_kegiatan} (Laporan Hasil Evaluasi)"}
-                            data_b = generate_isi_laporan(current_rhk, f"{modul_name} (Hasil)", meta['kpm'], "Peserta", meta['bulan'], lokasi_lengkap, "Evaluasi", item.get('app'), extra_info_b['desc'])
-                            if data_b:
-                                for f in item['foto']: f.seek(0)
-                                w = create_word_doc(data_b, meta, item['foto'], kop, ttd, extra_info_b)
-                                for f in item['foto']: f.seek(0)
-                                p = create_pdf_doc(data_b, meta, item['foto'], kop, ttd, extra_info_b)
-                                results.append({'nama': f"{modul_name} - Hasil (B)", 'word': w.getvalue(), 'pdf': p})
-                        else:
-                            extra_info = {'app': item.get('app'), 'desc': detail_kegiatan}
-                            data_isi = generate_isi_laporan(current_rhk, modul_name, meta['kpm'], "Peserta", meta['bulan'], lokasi_lengkap, "", item.get('app'), detail_kegiatan)
-                            if data_isi:
-                                for f in item['foto']: f.seek(0)
-                                w = create_word_doc(data_isi, meta, item['foto'], kop, ttd, extra_info)
-                                for f in item['foto']: f.seek(0)
-                                p = create_pdf_doc(data_isi, meta, item['foto'], kop, ttd, extra_info)
-                                results.append({'nama': modul_name, 'word': w.getvalue(), 'pdf': p})
-                                
-                        progress.progress((i+1)/len(queue))
-                    
-                    st.session_state[current_results_key] = results
-                    status.text("✅ Selesai!"); st.rerun()
-
-            res_data = st.session_state.get(current_results_key)
-            if res_data:
-                st.divider(); st.write("### 📥 Download Hasil:")
-                for i, res in enumerate(res_data):
-                    c1, c2, c3 = st.columns([3,1,1])
-                    c1.write(f"📘 **{res['nama']}**")
-                    c2.download_button("⬇️ Word", res['word'], f"{res['nama']}.docx", key=f"wq_{i}")
-                    c3.download_button("⬇️ PDF", res['pdf'], f"{res['nama']}.pdf", key=f"pq_{i}")
-                    st.write("---")
-
-        # --- RHK LAIN (BIASA - RHK 1, 5, 6) ---
-        else:
-            daftar_sub = CONFIG_LAPORAN[current_rhk]
+                        if nu: [auto_save_photo_local(f, cr, meta['bulan']) for f in nu]
+                        st.session_state[qk].append({"modul": md, "foto": ph, "foto_count": len(ph), "app": ap, "desc": kt})
+                        st.success("Masuk!"); time.sleep(0.5); st.rerun()
             
-            # LOGIKA OTOMATIS: JIKA RHK 1,5,6 -> Judul Spesifik Otomatis dari Config
-            if is_rhk1 or is_rhk5 or is_rhk6:
-                judul_spesifik = daftar_sub[0] # Ambil yang pertama (default)
-                st.info(f"📌 **Nama Kegiatan:** {judul_spesifik}") # Tampilkan sebagai Info statis
-            else:
-                # Jika ada RHK lain yang butuh input manual
-                judul_spesifik = st.text_input("Nama Kegiatan:", value=daftar_sub[0] if daftar_sub else "")
+            q = st.session_state[qk]
+            if q:
+                st.write(f"### 📋 List ({len(q)})"); 
+                for i,x in enumerate(q): st.write(f"{i+1}. {x['modul']} ({x['foto_count']} Foto)")
+                if st.button("Hapus Semua"): st.session_state[qk]=[]; st.rerun()
+                if st.button("🚀 Generate Semua", type="primary"):
+                    res=[]; pr=st.progress(0); stt=st.empty()
+                    for i, it in enumerate(q):
+                        nm=it['modul']; stt.info(f"Proses: {nm}..."); time.sleep(3)
+                        d = generate_isi_laporan(cr, nm, meta['kpm'], "Peserta", meta['bulan'], loc, "", it.get('app'), it.get('desc'))
+                        if d:
+                            [p.seek(0) for p in it['foto']]
+                            w_io = io.BytesIO(create_word_doc(d, meta, it['foto'], kop, ttd, {'desc':it.get('desc')}).getvalue()); w_io.seek(0)
+                            p_io = io.BytesIO(create_pdf_doc(d, meta, it['foto'], kop, ttd, {'desc':it.get('desc')})); p_io.seek(0)
+                            
+                            w_link = upload_to_gdrive(w_io, f"{nm}.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+                            p_link = upload_to_gdrive(p_io, f"{nm}.pdf", "application/pdf")
+                            
+                            res.append({'nama': nm, 'word': w_io.getvalue(), 'pdf': p_io.getvalue(), 'link': w_link})
+                        pr.progress((i+1)/len(q))
+                    st.session_state[rk]=res; st.success("Selesai!"); st.rerun()
             
-            # REVISI: Pastikan label bertuliskan (Opsional)
-            ket_umum = st.text_area("Keterangan Tambahan (Opsional):", placeholder="Contoh: Kegiatan berjalan lancar...", height=80)
-            final_photos, new_uploads = render_photo_manager("biasa")
+            rs = st.session_state.get(rk)
+            if rs:
+                for i, r in enumerate(rs):
+                    c1,c2,c3=st.columns([3,1,1]); c1.write(f"📘 **{r['nama']}**")
+                    c2.download_button("Word", r['word'], f"{r['nama']}.docx", key=f"wq{i}")
+                    c3.download_button("PDF", r['pdf'], f"{r['nama']}.pdf", key=f"pq{i}")
+                    if r.get('link'): st.caption(f"🔗 [Lihat di Drive]({r['link']})")
 
-            if st.button("🚀 Buat Laporan", type="primary", use_container_width=True):
-                if GOOGLE_API_KEY == "MASUKKAN_KEY_GOOGLE_ANDA_DISINI":
-                    st.error("API Key Kosong!")
-                else:
-                    with st.spinner("Memproses..."):
-                        if new_uploads:
-                            for f in new_uploads: auto_save_photo_local(f, current_rhk, meta['bulan'])
-
-                        lokasi_lengkap = f"Desa/Kel {meta['kel']}, Kec. {meta['kec']}, {meta['kab']}, {meta['prov']}"
-                        full_desc = f"Kegiatan: {judul_spesifik}. {ket_umum}"
-                        data_isi = generate_isi_laporan(current_rhk, judul_spesifik, meta['kpm'], f"{meta['kpm']} Peserta", meta['bulan'], lokasi_lengkap, ket_info=full_desc)
+        else: # RHK 1, 5, 6
+            sub = CONFIG_LAPORAN[cr]
+            jk = sub[0] if len(sub)==1 else st.text_input("Kegiatan:", value=sub[0])
+            kt = st.text_area("Ket:", height=80); ph, nu = phot_man("s")
+            
+            if st.button("🚀 Generate Laporan", type="primary"):
+                if nu: [auto_save_photo_local(f, cr, meta['bulan']) for f in nu]
+                with st.status("Proses...", expanded=True) as s:
+                    st.write("Analisis..."); time.sleep(2); st.write("AI Generating...")
+                    d = generate_isi_laporan(cr, jk, meta['kpm'], "Peserta", meta['bulan'], loc, ket_info=kt)
+                    if d:
+                        st.write("Menyusun & Upload...")
+                        [p.seek(0) for p in ph]; w_io=io.BytesIO(create_word_doc(d, meta, ph, kop, ttd, {'desc':kt}).getvalue()); w_io.seek(0)
+                        [p.seek(0) for p in ph]; p_io=io.BytesIO(create_pdf_doc(d, meta, ph, kop, ttd, {'desc':kt})); p_io.seek(0)
                         
-                        if data_isi:
-                            extra_info = {'desc': full_desc}
-                            for fp in final_photos: fp.seek(0)
-                            w = create_word_doc(data_isi, meta, final_photos, kop, ttd, extra_info)
-                            for fp in final_photos: fp.seek(0)
-                            p = create_pdf_doc(data_isi, meta, final_photos, kop, ttd, extra_info)
-                            st.session_state['generated_file_data'] = {'type': 'single', 'word': w.getvalue(), 'pdf': p, 'name': current_rhk}
-                            st.success("✅ Berhasil!"); st.rerun()
-                    
-                    simpan_riwayat(current_rhk, "Generated", meta['kel'])
+                        w_link = upload_to_gdrive(w_io, f"{cr}.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+                        p_link = upload_to_gdrive(p_io, f"{cr}.pdf", "application/pdf")
+                        
+                        st.session_state['generated_file_data']={'name':cr, 'word':w_io.getvalue(), 'pdf':p_io.getvalue(), 'link': w_link}
+                        simpan_riwayat(cr, "Gen", meta['kel']); s.update(label="Selesai!", state="complete", expanded=False)
+                    else: s.update(label="Gagal", state="error")
 
-            files = st.session_state.get('generated_file_data')
-            if files:
-                st.divider()
-                c1, c2 = st.columns(2)
-                c1.download_button("📄 Download WORD", files['word'], f"{files['name']}.docx", "application/docx")
-                c2.download_button("📕 Download PDF", files['pdf'], f"{files['name']}.pdf", "application/pdf")
+            f = st.session_state.get('generated_file_data')
+            if f:
+                c1,c2=st.columns(2)
+                c1.download_button("Word", f['word'], f"{f['name']}.docx")
+                c2.download_button("PDF", f['pdf'], f"{f['name']}.pdf")
+                if f.get('link'): st.success(f"✅ File tersimpan di Google Drive! [Klik untuk buka]({f['link']})")
 
-    # ==========================================
-    # 6. ROUTING
-    # ==========================================
     render_sidebar()
     if st.session_state['page'] == 'home': show_dashboard()
-    elif st.session_state['page'] == 'detail': show_detail_page()
+    elif st.session_state['page'] == 'detail': show_detail()
