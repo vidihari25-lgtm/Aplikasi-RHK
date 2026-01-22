@@ -3,4 +3,7 @@ google-generativeai
 python-docx
 fpdf
 pandas
-Pillow
+openpyxl
+pillow
+google-api-python-client
+google-auth
