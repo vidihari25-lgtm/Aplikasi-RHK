@@ -1,573 +1,301 @@
 import streamlit as st
+
+# === FIX BUG ANTIALIAS (WAJIB DI PALING ATAS) ===
+import PIL.Image
+if not hasattr(PIL.Image, 'ANTIALIAS'):
+    PIL.Image.ANTIALIAS = PIL.Image.LANCZOS
+# ================================================
+
 import google.generativeai as genai
-from docx import Document
-from docx.shared import Pt, Inches, Cm
-from docx.enum.text import WD_ALIGN_PARAGRAPH
-from fpdf import FPDF
-import io
-import pandas as pd
-import sqlite3
-from datetime import datetime
-import time
-import os
-from PIL import Image
-import tempfile
 import json
+import requests
+import time
+import tempfile
+import asyncio
+import edge_tts
 import re
+import random
+import os
+from moviepy.editor import ImageClip, AudioFileClip, concatenate_videoclips, CompositeVideoClip
 
-# --- LIBRARY GOOGLE DRIVE ---
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
+# --- KONFIGURASI HALAMAN ---
+st.set_page_config(page_title="AI Story Video Pro (Multi-Char)", page_icon="🎬", layout="wide")
 
-# ==========================================
-# 1. KONFIGURASI HALAMAN
-# ==========================================
-st.set_page_config(page_title="Aplikasi RHK PKH Pro", layout="wide", page_icon="📊")
-
-# --- KONFIGURASI GOOGLE DRIVE ---
-# GANTI DENGAN ID FOLDER GOOGLE DRIVE ANDA (Cek URL folder drive Anda)
-PARENT_FOLDER_ID = "1zaO1MEKf6dwbwB0LCLe_9dqDaZjTX1DB" 
-
-# --- DAFTAR USER & PASSWORD ---
-DAFTAR_USER = {
-    "admin": "admin123",
-    "pendamping": "pkh2026",
-    "user": "user"
-}
-
-# ==========================================
-# 2. SISTEM KEAMANAN & KONEKSI
-# ==========================================
-
-# Cek Secrets
-if "GOOGLE_API_KEY" not in st.secrets:
-    st.error("🚨 Secrets GOOGLE_API_KEY belum diisi!")
+# --- AMBIL API KEY DARI SECRETS ---
+try:
+    GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+except FileNotFoundError:
+    st.error("⚠️ File `.streamlit/secrets.toml` belum dibuat!")
+    st.stop()
+except KeyError:
+    st.error("⚠️ Key `GEMINI_API_KEY` tidak ditemukan di secrets!")
     st.stop()
 
-if "gcp_service_account" not in st.secrets:
-    st.warning("⚠️ Secrets GCP Service Account belum diisi! Upload Drive tidak akan berfungsi.")
+# --- SESSION STATE ---
+if 'generated_scenes' not in st.session_state: st.session_state['generated_scenes'] = []
+if 'ai_images_data' not in st.session_state: st.session_state['ai_images_data'] = {}
+if 'final_video_path' not in st.session_state: st.session_state['final_video_path'] = None
 
-# Konfigurasi AI
-try:
-    genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-    model = genai.GenerativeModel('gemini-flash-latest')
-except Exception as e:
-    st.error(f"Gagal konfigurasi AI: {e}")
-
-# --- FUNGSI GOOGLE DRIVE ---
-def get_drive_service():
+# --- FUNGSI BANTUAN ---
+def extract_json(text):
     try:
-        creds_dict = dict(st.secrets["gcp_service_account"])
-        creds = service_account.Credentials.from_service_account_info(
-            creds_dict, scopes=['https://www.googleapis.com/auth/drive.file']
-        )
-        return build('drive', 'v3', credentials=creds)
+        text = re.sub(r'```json\s*', '', text)
+        text = re.sub(r'```\s*$', '', text)
+        match = re.search(r'\[.*\]', text, re.DOTALL)
+        if match: return json.loads(match.group())
+        return json.loads(text)
     except: return None
 
-def upload_to_drive(file_obj, filename, mime_type):
-    """Upload file langsung ke Google Drive"""
-    service = get_drive_service()
-    if not service: return None
+# --- FUNGSI BARU: ANALISIS GAMBAR KARAKTER ---
+def analyze_uploaded_char(api_key, image_file):
     try:
-        file_obj.seek(0)
-        metadata = {'name': filename, 'parents': [PARENT_FOLDER_ID]}
-        media = MediaIoBaseUpload(file_obj, mimetype=mime_type, resumable=True)
-        file = service.files().create(body=metadata, media_body=media, fields='webViewLink').execute()
-        return file.get('webViewLink')
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        img = PIL.Image.open(image_file)
+        prompt = "Describe the visual appearance of this character in detail (face, hair, clothes, style) in one paragraph. Start with 'A character looking like...'"
+        response = model.generate_content([prompt, img])
+        return response.text.strip()
     except Exception as e:
-        st.error(f"Gagal Upload Drive: {e}")
+        return f"Error analyzing image: {e}"
+
+# --- FUNGSI 1: AI SCENARIO ---
+def generate_scenes_logic(api_key, input_text, input_mode, char_desc, target_scenes):
+    genai.configure(api_key=api_key)
+    mode_instruction = ""
+    if input_mode == "Judul Cerita": mode_instruction = f"Story from title: '{input_text}'."
+    elif input_mode == "Sinopsis": mode_instruction = f"Expand synopsis: '{input_text}'."
+    elif input_mode == "Cerita Jadi": mode_instruction = f"Use exactly: '{input_text}'."
+
+    prompt = f"""
+    Act as Video Director. Mode: {input_mode}. 
+    
+    CHARACTERS IN THIS STORY:
+    {char_desc}
+    
+    Task: {mode_instruction}.
+    Create exactly {target_scenes} scenes.
+    OUTPUT JSON ARRAY ONLY:
+    [{{"scene_number": 1, "narration": "Indonesian narration...", "image_prompt": "Cinematic shot of [Insert specific Character Name from list], [action], 8k"}}]
+    """
+    try:
+        model = genai.GenerativeModel('gemini-flash-latest')
+        response = model.generate_content(prompt)
+        return extract_json(response.text)
+    except: return None
+
+# --- FUNGSI 2: GAMBAR ---
+def generate_image_pollinations(prompt):
+    clean = requests.utils.quote(prompt)
+    seed = random.randint(1, 99999)
+    url = f"https://image.pollinations.ai/prompt/{clean}?width=1280&height=720&seed={seed}&nologo=true&model=flux"
+    try:
+        resp = requests.get(url, timeout=60)
+        return resp.content if resp.status_code == 200 else None
+    except: return None
+
+# --- FUNGSI 3: AUDIO ---
+async def edge_tts_generate(text, voice, output_file):
+    communicate = edge_tts.Communicate(text, voice)
+    await communicate.save(output_file)
+
+def generate_audio_sync(text, gender):
+    voice = "id-ID-ArdiNeural" if gender == "Cowok (Ardi)" else "id-ID-GadisNeural"
+    try:
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+        temp_file.close()
+        asyncio.run(edge_tts_generate(text, voice, temp_file.name))
+        return temp_file.name
+    except: return None
+
+# --- FUNGSI 4: VIDEO ENGINE ---
+def create_final_video(assets):
+    clips = []
+    log_box = st.empty()
+    W, H = 1280, 720 
+    
+    for i, asset in enumerate(assets):
+        try:
+            log_box.info(f"⚙️ Memproses Clip {i+1} dari {len(assets)}...")
+            
+            original_img = PIL.Image.open(asset['image'])
+            if original_img.mode != 'RGB':
+                original_img = original_img.convert('RGB')
+            clean_img = original_img.resize((W, H), PIL.Image.LANCZOS)
+            
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as f:
+                clean_img.save(f, quality=95)
+                clean_img_path = f.name
+            
+            audio = AudioFileClip(asset['audio'])
+            duration = audio.duration + 0.5
+            
+            img_clip = ImageClip(clean_img_path).set_duration(duration)
+            img_clip = img_clip.resize(lambda t: 1.1 - (0.005 * t))
+            img_clip = img_clip.set_position('center')
+            
+            final_clip = CompositeVideoClip([img_clip], size=(W, H))
+            final_clip = final_clip.set_audio(audio)
+            final_clip = final_clip.set_fps(24)
+            clips.append(final_clip)
+            
+        except Exception as e:
+            st.error(f"❌ Error Scene {i+1}: {str(e)}")
+            continue
+
+    if not clips: return None
+        
+    try:
+        log_box.info("🎞️ Rendering Final...")
+        output_path = tempfile.mktemp(suffix=".mp4")
+        final_video = concatenate_videoclips(clips, method="compose")
+        final_video.write_videofile(output_path, fps=24, codec='libx264', audio_codec='aac', preset='ultrafast', threads=1, logger=None)
+        log_box.success("✅ Selesai!")
+        return output_path
+    except Exception as e:
+        st.error(f"❌ Error Render: {str(e)}")
         return None
 
-# --- CEK PASSWORD ---
-def check_password():
-    if st.session_state.get("password_correct", False): return True
-    qp = st.query_params
-    if qp.get("auth") == "valid" and qp.get("user") in DAFTAR_USER:
-        st.session_state["password_correct"] = True
-        st.session_state["username"] = qp.get("user")
-        return True
+# ================= UI APLIKASI =================
 
-    st.markdown("<br><br>", unsafe_allow_html=True)
-    st.markdown("<h1 style='text-align: center;'>🔐 LOGIN APLIKASI</h1>", unsafe_allow_html=True)
-    c1, c2, c3 = st.columns([1, 2, 1])
+st.sidebar.title("⚙️ Pengaturan")
+voice_gender = st.sidebar.selectbox("Suara", ["Cowok (Ardi)", "Cewek (Gadis)"])
+num_scenes = st.sidebar.slider("Jumlah Scene", 1, 100, 5)
+
+if st.sidebar.button("🗑️ Reset Baru"):
+    st.session_state['generated_scenes'] = []
+    st.session_state['ai_images_data'] = {}
+    st.session_state['final_video_path'] = None
+    st.rerun()
+
+st.title("🎬 AI Video Maker (Multi-Character)")
+st.markdown("---")
+
+# INPUT SECTION
+if not st.session_state['generated_scenes']:
+    c1, c2 = st.columns([1, 2])
+    
+    # === KOLOM KARAKTER (MODIFIKASI: 3 TEKS + 1 GAMBAR) ===
+    with c1:
+        st.info("👥 **Input Karakter**")
+        st.caption("Isi ciri-ciri karakter yang akan muncul di cerita.")
+        
+        # Karakter Teks 1-3
+        char1 = st.text_input("Tokoh 1 (Nama & Ciri):", placeholder="Misal: Budi, anak kecil berbaju merah")
+        char2 = st.text_input("Tokoh 2 (Nama & Ciri):", placeholder="Misal: Siti, wanita rambut panjang kacamata")
+        char3 = st.text_input("Tokoh 3 (Nama & Ciri):", placeholder="Misal: Robot Besi, warna silver, mata merah")
+        
+        st.divider()
+        
+        # Karakter Gambar
+        st.write("**Tokoh 4 (Dari Gambar):**")
+        char_img_upload = st.file_uploader("Upload foto referensi karakter:", type=['jpg', 'png', 'jpeg'])
+        char4_desc = ""
+        if char_img_upload:
+            st.image(char_img_upload, caption="Preview Karakter 4", width=150)
+            
+    # === KOLOM CERITA ===
     with c2:
-        u = st.text_input("Username", key="login_user")
-        p = st.text_input("Password", type="password", key="login_pass")
-        if st.button("MASUK / LOGIN", type="primary", use_container_width=True):
-            if u in DAFTAR_USER and DAFTAR_USER[u] == p:
-                st.session_state["password_correct"] = True
-                st.session_state["username"] = u
-                st.query_params["auth"] = "valid"; st.query_params["user"] = u
+        st.info("📖 **Cerita**")
+        mode = st.radio("Mode:", ["Judul Cerita", "Sinopsis", "Cerita Jadi"], horizontal=True)
+        placeholder_text = ""
+        if mode == "Judul Cerita": placeholder_text = "Contoh: Petualangan Budi dan Robot Besi"
+        elif mode == "Sinopsis": placeholder_text = "Contoh: Budi bertemu robot rusak di hutan..."
+        else: placeholder_text = "Paste seluruh naskah ceritamu di sini..."
+        story = st.text_area("Konten Cerita:", height=300, placeholder=placeholder_text)
+    
+    # === TOMBOL EKSEKUSI ===
+    if st.button("📝 Buat Skenario", type="primary", use_container_width=True):
+        if story:
+            progress_text = st.empty()
+            progress_text.text("🔄 Mengumpulkan data karakter...")
+            
+            # 1. GABUNGKAN DESKRIPSI KARAKTER
+            combined_char_desc = "Daftar Karakter:\n"
+            if char1: combined_char_desc += f"- Karakter 1: {char1}\n"
+            if char2: combined_char_desc += f"- Karakter 2: {char2}\n"
+            if char3: combined_char_desc += f"- Karakter 3: {char3}\n"
+            
+            # 2. ANALISIS GAMBAR (Jika ada)
+            if char_img_upload:
+                progress_text.text("🔄 Menganalisis gambar Karakter 4...")
+                img_desc = analyze_uploaded_char(GEMINI_API_KEY, char_img_upload)
+                combined_char_desc += f"- Karakter 4 (Visual Reference): {img_desc}\n"
+            
+            # Validasi minimal 1 karakter
+            if len(combined_char_desc) < 20: # Cuma header doang
+                combined_char_desc = "General characters fitting the story context."
+
+            # 3. GENERATE SCENES
+            progress_text.text("🤖 Membuat Skenario dengan AI...")
+            res = generate_scenes_logic(GEMINI_API_KEY, story, mode, combined_char_desc, num_scenes)
+            
+            if res:
+                st.session_state['generated_scenes'] = res
+                progress_text.empty()
                 st.rerun()
-            else: st.error("Salah!")
-    return False
+            else:
+                progress_text.error("Gagal membuat skenario.")
+        else: st.warning("Mohon isi cerita terlebih dahulu.")
 
-if check_password():
+# EDITOR SECTION
+else:
+    st.info("ℹ️ Tips: Scene tanpa gambar otomatis pakai gambar sebelumnya.")
+    
+    with st.container():
+        for i, scene in enumerate(st.session_state['generated_scenes']):
+            with st.expander(f"Scene {i+1}: {scene['narration'][:40]}...", expanded=True):
+                col_a, col_b, col_c = st.columns([2, 1, 1])
+                with col_a:
+                    st.write(f"Narasi: {scene['narration']}")
+                    st.code(scene['image_prompt'], language="text")
+                with col_b:
+                    if st.button(f"🎲 Generate AI {i+1}", key=f"gen_{i}"):
+                        with st.spinner("Gen..."):
+                            data = generate_image_pollinations(scene['image_prompt'])
+                            if data: st.session_state['ai_images_data'][i] = data
+                    uploaded = st.file_uploader(f"Upload {i+1}", type=['jpg','png'], key=f"up_{i}")
+                with col_c:
+                    if uploaded: st.image(uploaded, use_container_width=True)
+                    elif i in st.session_state['ai_images_data']: st.image(st.session_state['ai_images_data'][i], use_container_width=True)
 
-    # ==========================================
-    # 3. CSS TATA LETAK (TOMBOL KOTAK)
-    # ==========================================
-    st.markdown("""
-        <style>
-        /* 1. TOMBOL UTAMA MENJADI KOTAK PERSEGI (1:1) */
-        div[data-testid="column"] button {
-            width: 100% !important;
-            aspect-ratio: 1 / 1 !important; 
-            height: auto !important;
-            padding: 10px !important;
-            white-space: pre-wrap !important;
-            display: flex !important;
-            flex-direction: column !important;
-            justify-content: center !important;
-            align-items: center !important;
-            border-radius: 15px !important;
-            border: 1px solid #e0e0e0 !important;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.05) !important;
-            transition: transform 0.2s !important;
-        }
-        div[data-testid="column"] button:hover {
-            transform: scale(1.03) !important;
-            border-color: #ff4b4b !important;
-            background-color: #fffafb !important;
-        }
+    st.divider()
+    
+    # RENDER & DOWNLOAD
+    if st.button("🚀 RENDER VIDEO", type="primary", use_container_width=True):
+        final_assets = []
+        last_valid_img = None
+        progress_bar = st.progress(0)
         
-        /* 2. HIRARKI FONT TOMBOL */
-        div[data-testid="column"] button p {
-            text-align: center !important; margin: 0 !important;
-        }
-        /* Baris 1 (Judul): Besar & Tebal */
-        div[data-testid="column"] button p::first-line {
-            font-size: 1.5rem !important; 
-            font-weight: 800 !important; 
-            line-height: 2 !important;
-            color: #31333F !important;
-        }
-        /* Baris 2 (Ket): Kecil & Menyesuaikan */
-        div[data-testid="column"] button p {
-            font-size: 0.9rem !important; 
-            font-weight: 400 !important; 
-            color: #555 !important;
-        }
-
-        /* 3. TOMBOL SIDEBAR */
-        section[data-testid="stSidebar"] button {
-            width: 100% !important; border-radius: 8px !important; border: 1px solid #ccc !important;
-        }
-        </style>
-    """, unsafe_allow_html=True)
-
-    # ==========================================
-    # 4. SETUP STATE & DB
-    # ==========================================
-    with st.sidebar:
-        st.write(f"👤 Login: **{st.session_state.get('username', 'User')}**")
-        if st.button("🔒 Logout"):
-            st.session_state["password_correct"] = False
-            st.query_params.clear(); st.rerun()
-
-    keys = ['page', 'selected_rhk', 'kop_bytes', 'ttd_bytes', 'graduasi_raw', 'graduasi_fix', 
-            'generated_file_data', 'rhk3_results', 'rhk2_queue', 'rhk2_results', 
-            'rhk4_queue', 'rhk4_results', 'rhk7_queue', 'rhk7_results', 'tgl_val', 'bln_val', 'th_val'] 
-    for k in keys:
-        if k not in st.session_state: st.session_state[k] = None
-
-    if "page" in st.query_params: st.session_state['page'] = st.query_params["page"]
-    if "rhk" in st.query_params: st.session_state['selected_rhk'] = st.query_params["rhk"]
-
-    # Init State
-    if st.session_state['rhk2_queue'] is None: st.session_state['rhk2_queue'] = []
-    if st.session_state['rhk4_queue'] is None: st.session_state['rhk4_queue'] = []
-    if st.session_state['rhk7_queue'] is None: st.session_state['rhk7_queue'] = []
-    if st.session_state['page'] is None: st.session_state['page'] = 'home'
-    if not st.session_state['bln_val']: st.session_state['bln_val'] = "JANUARI"
-    if not st.session_state['th_val']: st.session_state['th_val'] = "2026"
-    if not st.session_state['tgl_val']: st.session_state['tgl_val'] = "30 Januari 2026"
-
-    CONFIG_LAPORAN = {
-        "RHK 1 – LAPORAN PENYALURAN": ["Laporan Penyaluran Bantuan Sosial"],
-        "RHK 2 – LAPORAN P2K2 (FDS)": ["Modul Ekonomi 1", "Modul Ekonomi 2", "Modul Kesehatan 1", "Modul Kesehatan 2", "Modul Pengasuhan 1", "Modul Perlindungan 1"],
-        "RHK 3 – TARGET GRADUASI MANDIRI": ["Laporan Graduasi Mandiri"], 
-        "RHK 4 – KEGIATAN PEMUTAKHIRAN": ["Verifikasi Pendidikan", "Verifikasi Kesehatan", "Verifikasi Kesos"],
-        "RHK 5 – KPM YANG DIMUTAKHIRKAN": ["Laporan Pemutakhiran Data"],
-        "RHK 6 – LAPORAN KASUS ADAPTIF": ["Case Management"],
-        "RHK 7 – LAPORAN DIREKTIF": ["Tugas Direktif"]
-    }
-
-    def init_db():
-        conn = sqlite3.connect('riwayat_v40_finalbtn.db')
-        c = conn.cursor()
-        c.execute('''CREATE TABLE IF NOT EXISTS riwayat (id INTEGER PRIMARY KEY, tgl TEXT, rhk TEXT, judul TEXT, lokasi TEXT)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS user_settings (id INTEGER PRIMARY KEY, nama TEXT, nip TEXT, kpm INTEGER, prov TEXT, kab TEXT, kec TEXT, kel TEXT)''')
-        c.execute('SELECT count(*) FROM user_settings')
-        if c.fetchone()[0] == 0:
-            c.execute('INSERT INTO user_settings VALUES (1, "Vidi Hari Suci", "123456", 250, "Lampung", "Lampung Tengah", "Punggur", "Mojopahit")')
-        conn.commit(); conn.close()
-
-    def get_user_settings():
-        conn = sqlite3.connect('riwayat_v40_finalbtn.db'); c = conn.cursor()
-        c.execute('SELECT nama, nip, kpm, prov, kab, kec, kel FROM user_settings WHERE id=1')
-        data = c.fetchone(); conn.close(); return data
-
-    def save_user_settings(nama, nip, kpm, prov, kab, kec, kel):
-        conn = sqlite3.connect('riwayat_v40_finalbtn.db'); c = conn.cursor()
-        c.execute('''UPDATE user_settings SET nama=?, nip=?, kpm=?, prov=?, kab=?, kec=?, kel=? WHERE id=1''', (nama, nip, kpm, prov, kab, kec, kel))
-        conn.commit(); conn.close()
-
-    def simpan_riwayat(rhk, judul, lokasi):
-        try:
-            conn = sqlite3.connect('riwayat_v40_finalbtn.db'); c = conn.cursor()
-            tgl = datetime.now().strftime("%Y-%m-%d %H:%M")
-            c.execute('INSERT INTO riwayat (tgl, rhk, judul, lokasi) VALUES (?, ?, ?, ?)', (tgl, rhk, judul, lokasi))
-            conn.commit(); conn.close()
-        except: pass
-
-    init_db()
-
-    # --- TOOLS & HELPERS ---
-    def compress_image(uploaded_file, quality=70, max_width=800):
-        try:
-            uploaded_file.seek(0); image = Image.open(uploaded_file)
-            if image.mode in ("RGBA", "P"): image = image.convert("RGB")
-            if image.width > max_width:
-                ratio = max_width / float(image.width); new_height = int((float(image.height) * float(ratio)))
-                image = image.resize((max_width, new_height), Image.Resampling.LANCZOS)
-            output = io.BytesIO(); image.save(output, format="JPEG", quality=quality, optimize=True)
-            output.seek(0); uploaded_file.seek(0); return output
-        except: uploaded_file.seek(0); return uploaded_file 
-
-    def safe_str(d): return str(list(d.values())[0]) if isinstance(d, dict) else "-" if d is None else str(d)
-    def clean_text_for_pdf(t): return safe_str(t).encode('latin-1', 'replace').decode('latin-1')
-    def reset_states():
-        st.session_state['rhk2_queue'] = []; st.session_state['rhk4_queue'] = []
-        st.session_state['rhk7_queue'] = []; st.session_state['generated_file_data'] = None
-        st.session_state['rhk3_results'] = None
-
-    def generate_isi_laporan(topik, detail, kpm_total, kpm_fokus, bulan, lokasi_lengkap, analisis="", app_info="", ket_info=""):
-        max_retries = 3
-        prompt = f"""Role: Pendamping PKH. Buat JSON Laporan. KONTEKS: RHK: {topik}, Kegiatan: {detail}, Lokasi: {lokasi_lengkap}, Periode: {bulan}, Catatan: {ket_info}.
-        Output JSON Wajib (lowercase key): {{ "gambaran_umum": "...", "maksud_tujuan": "...", "ruang_lingkup": "...", "dasar_hukum": ["..."], "kegiatan": ["..."], "hasil": ["..."], "kesimpulan": "...", "saran": ["..."], "penutup": "..." }}"""
-        for i in range(max_retries):
-            try:
-                res = model.generate_content(prompt); txt = res.text
-                cln = txt.replace("```json", "").replace("```", "").strip()
-                try: return json.loads(cln)
-                except:
-                    m = re.search(r'\{.*\}', txt, re.DOTALL)
-                    if m: return json.loads(m.group())
-            except: 
-                if i < max_retries - 1: time.sleep(2); continue
-                return None
-        return None
-
-    # ==========================================
-    # 5. DOCUMENT GENERATORS
-    # ==========================================
-    def create_word_doc(data, meta, imgs, kop, ttd, extra_info=None, kpm_data=None):
-        doc = Document(); 
-        for s in doc.sections: s.top_margin=Cm(2); s.bottom_margin=Cm(2); s.left_margin=Cm(2.5); s.right_margin=Cm(2.5)
-        style = doc.styles['Normal']; style.font.name = 'Times New Roman'; style.font.size = Pt(12)
-        if kop: p=doc.add_paragraph(); p.alignment=1; p.add_run().add_picture(io.BytesIO(kop), width=Inches(6.2))
-        
-        doc.add_paragraph(" "); p=doc.add_paragraph(); p.alignment=1
-        run=p.add_run(f"LAPORAN\nTENTANG\n{meta['judul'].upper()}\n{meta['bulan'].upper()}"); run.bold=True; run.font.size=Pt(14)
-        doc.add_paragraph(" ")
-
-        def add_p(t):
-            for x in safe_str(t).split('\n'):
-                if x.strip(): p=doc.add_paragraph(); p.paragraph_format.first_line_indent=Cm(1.27); p.alignment=WD_ALIGN_PARAGRAPH.JUSTIFY; p.add_run(x.strip())
-
-        doc.add_paragraph("A. Pendahuluan", style='Heading 1')
-        doc.add_paragraph("1. Gambaran Umum", style='Heading 2'); add_p(f"Lokasi: {meta['kel']}, {meta['kec']}, {meta['kab']}."); add_p(data.get('gambaran_umum'))
-        doc.add_paragraph("2. Maksud dan Tujuan", style='Heading 2'); add_p(data.get('maksud_tujuan'))
-        doc.add_paragraph("3. Ruang Lingkup", style='Heading 2'); add_p(data.get('ruang_lingkup'))
-        doc.add_paragraph("4. Dasar", style='Heading 2')
-        for i,x in enumerate(data.get('dasar_hukum', []),1): p=doc.add_paragraph(); p.paragraph_format.left_indent=Cm(0.75); p.paragraph_format.first_line_indent=Cm(-0.75); p.add_run(f"{i}.\t{safe_str(x)}")
-
-        doc.add_paragraph("B. Kegiatan", style='Heading 1')
-        if extra_info and extra_info.get('desc'): p=doc.add_paragraph(f"Fokus: {extra_info['desc']}"); p.runs[0].italic=True
-        for x in data.get('kegiatan', []): add_p(safe_str(x).replace('\n', ' '))
-
-        doc.add_paragraph("C. Hasil", style='Heading 1')
-        if kpm_data and isinstance(kpm_data, dict):
-            p=doc.add_paragraph(); p.add_run("Profil KPM:").bold=True
-            tbl=doc.add_table(rows=0, cols=3); tbl.autofit=False; tbl.columns[0].width=Cm(5.5); tbl.columns[1].width=Cm(0.5); tbl.columns[2].width=Cm(10.0)
-            fields = [("Nama", kpm_data.get('Nama', '-')), ("NIK", kpm_data.get('NIK', '-')), ("Alamat", kpm_data.get('Alamat', '-')), ("Kategori", kpm_data.get('Kategori', '-')), ("Status", kpm_data.get('Status', '-')), ("Jenis Graduasi", kpm_data.get('Jenis Graduasi', '-')), ("Tahun Bergabung", kpm_data.get('Tahun Bergabung', '-')), ("Anggota", kpm_data.get('Jumlah Anggota', '-')), ("Alasan", kpm_data.get('Alasan', '-'))]
-            for l,v in fields: r=tbl.add_row().cells; r[0].text=l; r[1].text=":"; r[2].text=str(v)
-            doc.add_paragraph(" ")
-        for i,x in enumerate(data.get('hasil', []),1): p=doc.add_paragraph(); p.paragraph_format.left_indent=Cm(0.75); p.paragraph_format.first_line_indent=Cm(-0.75); p.add_run(f"{i}.\t{safe_str(x)}")
-
-        doc.add_paragraph("D. Penutup", style='Heading 1'); add_p(data.get('kesimpulan')); add_p(data.get('penutup'))
-        doc.add_paragraph(" "); doc.add_paragraph(" ")
-        
-        tbl=doc.add_table(rows=1, cols=2); tbl.autofit=False; tbl.columns[0].width=Inches(3.5); tbl.columns[1].width=Inches(3.0)
-        c=tbl.cell(0,1); p=c.paragraphs[0]; p.alignment=1
-        p.add_run(f"Dibuat di {meta['kab']}\nPada Tanggal {meta['tgl']}\nPendamping PKH\n")
-        if ttd: p.add_run().add_picture(io.BytesIO(ttd), height=Inches(0.8)); p.add_run("\n")
-        else: p.add_run("\n\n\n")
-        p.add_run(f"\n{meta['nama']}\n").bold=True; p.add_run(f"NIP. {meta['nip']}")
-
-        doc.add_page_break(); p=doc.add_paragraph("DOKUMENTASI"); p.alignment=1; p.runs[0].bold=True; doc.add_paragraph(" ")
-        if imgs:
-            rt=doc.add_table(rows=(len(imgs)+1)//2, cols=2); rt.autofit=True
-            for i,im in enumerate(imgs):
-                try: 
-                    cl=rt.cell(i//2, i%2); p=cl.paragraphs[0]; p.alignment=1
-                    im.seek(0); p.add_run().add_picture(compress_image(im), width=Inches(2.8)); p.add_run(f"\nFoto {i+1}")
-                except: pass
-        bio=io.BytesIO(); doc.save(bio); return bio
-
-    def create_pdf_doc(data, meta, imgs, kop, ttd, extra_info=None, kpm_data=None):
-        pdf = FPDF(); pdf.set_margins(25, 20, 25); pdf.add_page(); pdf.set_font("Times", size=12)
-        def J(t): pdf.multi_cell(0, 6, clean_text_for_pdf(t), align='J')
-        def JI(t): pdf.multi_cell(0, 6, "        "+clean_text_for_pdf(t), align='J')
-        
-        if kop:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp: tmp.write(kop); pdf.image(tmp.name, 10, 10, 190); os.unlink(tmp.name); pdf.ln(35)
-        else: pdf.ln(10)
-
-        pdf.set_font("Times", "B", 14); pdf.cell(0,6,"LAPORAN",0,1,'C'); pdf.cell(0,6,"TENTANG",0,1,'C')
-        pdf.cell(0,6, clean_text_for_pdf(meta['judul'].upper()),0,1,'C'); pdf.cell(0,6, clean_text_for_pdf(meta['bulan'].upper()),0,1,'C'); pdf.ln(10)
-
-        pdf.set_font("Times", "B", 12); pdf.cell(0,8,"A. Pendahuluan",0,1)
-        pdf.cell(0,6,"1. Gambaran Umum",0,1); pdf.set_font("Times","",12); JI(f"Lokasi: {meta['kel']}, {meta['kec']}, {meta['kab']}."); JI(data.get('gambaran_umum'))
-        
-        pdf.set_font("Times", "B", 12); pdf.cell(0,6,"2. Maksud Tujuan",0,1); pdf.set_font("Times","",12); JI(data.get('maksud_tujuan'))
-        pdf.set_font("Times", "B", 12); pdf.cell(0,6,"3. Dasar",0,1); pdf.set_font("Times","",12)
-        for i,x in enumerate(data.get('dasar_hukum', []),1): pdf.cell(10,6,f"{i}.",0,0); pdf.multi_cell(0,6,clean_text_for_pdf(x))
-
-        pdf.ln(4); pdf.set_font("Times", "B", 12); pdf.cell(0,8,"B. Kegiatan",0,1); pdf.set_font("Times","",12)
-        if extra_info: pdf.set_font("Times","I",12); J(f"Fokus: {extra_info.get('desc')}"); pdf.set_font("Times","",12)
-        for x in data.get('kegiatan', []): JI(x)
-
-        pdf.ln(2); pdf.set_font("Times", "B", 12); pdf.cell(0,8,"C. Hasil",0,1); pdf.set_font("Times","",12)
-        if kpm_data and isinstance(kpm_data, dict):
-            fields = [("Nama", kpm_data.get('Nama', '-')), ("NIK", kpm_data.get('NIK', '-')), ("Alamat", kpm_data.get('Alamat', '-')), ("Kategori", kpm_data.get('Kategori', '-')), ("Status", kpm_data.get('Status', '-')), ("Jenis Graduasi", kpm_data.get('Jenis Graduasi', '-')), ("Tahun Bergabung", kpm_data.get('Tahun Bergabung', '-')), ("Anggota", kpm_data.get('Jumlah Anggota', '-')), ("Alasan", kpm_data.get('Alasan', '-'))]
-            for l,v in fields: pdf.cell(50,6,clean_text_for_pdf(l),0,0); pdf.cell(5,6,":",0,0); pdf.multi_cell(0,6,clean_text_for_pdf(str(v)),0,1)
-            pdf.ln(2)
-        for i,x in enumerate(data.get('hasil', []),1): pdf.cell(10,6,f"{i}.",0,0); pdf.multi_cell(0,6,clean_text_for_pdf(x))
-
-        pdf.ln(4); pdf.set_font("Times", "B", 12); pdf.cell(0,8,"D. Penutup",0,1); pdf.set_font("Times","",12); JI(data.get('penutup'))
-        
-        pdf.ln(10); x=110; pdf.set_x(x); pdf.cell(80,5,f"Dibuat di {meta['kab']}",0,1,'C')
-        pdf.set_x(x); pdf.cell(80,5,f"Pada {meta['tgl']}",0,1,'C'); pdf.set_x(x); pdf.cell(80,5,"Pendamping PKH",0,1,'C')
-        if ttd:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp: tmp.write(ttd); pdf.image(tmp.name, x+25, pdf.get_y(), h=25); os.unlink(tmp.name); pdf.ln(25)
-        else: pdf.ln(25)
-        pdf.set_x(x); pdf.set_font("Times","B",12); pdf.cell(80,5,clean_text_for_pdf(meta['nama']),0,1,'C')
-        pdf.set_x(x); pdf.set_font("Times","",12); pdf.cell(80,5,f"NIP. {meta['nip']}",0,1,'C')
-
-        if imgs:
-            pdf.add_page(); pdf.set_font("Times","B",12); pdf.cell(0,10,"DOKUMENTASI",0,1,'C'); pdf.ln(5)
-            for i,im in enumerate(imgs):
-                if i>0 and i%2==0:
-                    pdf.ln(60)
-                    if pdf.get_y()>250: pdf.add_page(); pdf.ln(10)
-                xp=30 if i%2==0 else 120; yp=pdf.get_y()
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-                    im.seek(0); tmp.write(im.read()); tp=tmp.name
-                try: pdf.image(tp, xp, yp, w=70, h=50); pdf.set_xy(xp, yp+52); pdf.set_font("Times","",9); pdf.multi_cell(70,4,f"Foto {i+1}",0,'C'); pdf.set_xy(25, yp)
-                except: pass
-                finally: os.unlink(tp)
-        return pdf.output(dest='S').encode('latin-1')
-
-    # ==========================================
-    # 6. UI HANDLER
-    # ==========================================
-    def update_tgl():
-        d="28" if st.session_state.bln_val=="FEBRUARI" else "30"
-        st.session_state.tgl_val = f"{d} {st.session_state.bln_val.title()} {st.session_state.th_val}"
-
-    def render_sidebar():
-        set_data = get_user_settings()
-        st.sidebar.header("👤 Profil Pendamping")
-        nm = st.sidebar.text_input("Nama", set_data[0], key="nama_val")
-        nip = st.sidebar.text_input("NIP", set_data[1], key="nip_val")
-        kpm = st.sidebar.number_input("Jml KPM", value=set_data[2], key="kpm_global_val")
-        st.sidebar.markdown("### 🌍 Wilayah")
-        prov = st.sidebar.text_input("Provinsi", set_data[3], key="prov_val")
-        kab = st.sidebar.text_input("Kabupaten", set_data[4], key="kab_val")
-        kec = st.sidebar.text_input("Kecamatan", set_data[5], key="kec_val")
-        kel = st.sidebar.text_input("Kelurahan", set_data[6], key="kel_val")
-        
-        st.sidebar.markdown("### 📅 Periode")
-        c1, c2 = st.sidebar.columns([1, 1.5])
-        with c1: st.selectbox("Tahun", ["2026", "2027"], key="th_val", on_change=update_tgl)
-        with c2: st.selectbox("Bulan", ["JANUARI", "FEBRUARI", "MARET", "APRIL", "MEI", "JUNI", "JULI", "AGUSTUS", "SEPTEMBER", "OKTOBER", "NOVEMBER", "DESEMBER"], key="bln_val", on_change=update_tgl)
-        st.sidebar.text_input("Tanggal Surat", key="tgl_val")
-        
-        st.sidebar.markdown("---")
-        k = st.sidebar.file_uploader("Kop", type=['png','jpg'])
-        t = st.sidebar.file_uploader("TTD", type=['png','jpg'])
-        if st.sidebar.button("💾 SIMPAN PROFIL"):
-            save_user_settings(nm, nip, kpm, prov, kab, kec, kel)
-            if k: st.session_state['kop_bytes'] = k.getvalue()
-            if t: st.session_state['ttd_bytes'] = t.getvalue()
-            st.sidebar.success("Disimpan!")
-
-    def show_dashboard():
-        st.title("📂 Aplikasi RHK PKH Pro"); st.markdown("### Menu Utama")
-        ks = list(CONFIG_LAPORAN.keys()); cols = st.columns(4)
-        for i, k in enumerate(ks):
-            ic = "💸" if "RHK 1" in k else "📚" if "RHK 2" in k else "🎓" if "RHK 3" in k else "📝" if "RHK 4" in k else "👥" if "RHK 5" in k else "🆘" if "RHK 6" in k else "📢"
-            lbl = f"{ic} {k.split('–')[0].strip()}\n\n{k.split('–')[-1].strip()}"
-            with cols[i % 4]:
-                if st.button(lbl, key=f"b_{i}", use_container_width=True): # USE CONTAINER WIDTH = PENTING UNTUK KOTAK
-                    st.session_state['selected_rhk']=k; st.session_state['page']='detail'
-                    st.query_params["page"]="detail"; st.query_params["rhk"]=k; reset_states(); st.rerun()
-
-    def show_detail():
-        cr = st.session_state['selected_rhk']
-        with st.container():
-            nc = st.columns(8)
-            if nc[0].button("🏠 HOME"):
-                st.session_state['page']='home'; st.query_params["page"]="home"
-                if "rhk" in st.query_params: del st.query_params["rhk"]
-                reset_states(); st.rerun()
-            for i, k in enumerate(CONFIG_LAPORAN.keys()):
-                if k!=cr and i+1<8:
-                    if nc[i+1].button(k.split('–')[0].strip(), key=f"n_{k}"):
-                        st.session_state['selected_rhk']=k; st.query_params["rhk"]=k; reset_states(); st.rerun()
-
-        st.divider(); st.subheader(cr)
-        def_jud = "KEGIATAN PENYALURAN" if "RHK 1" in cr else "P2K2 (FDS)" if "RHK 2" in cr else "GRADUASI MANDIRI" if "RHK 3" in cr else "PEMUTAKHIRAN DATA" if "RHK 4" in cr else "PEMUTAKHIRAN DATA KPM" if "RHK 5" in cr else "PENANGANAN KASUS" if "RHK 6" in cr else "TUGAS DIREKTIF"
-        jk = st.text_input("Judul Kop (Edit):", value=def_jud); st.divider()
-        
-        meta = {
-            'bulan': f"{st.session_state.bln_val} {st.session_state.th_val}",
-            'kpm': st.session_state.kpm_global_val, 'nama': st.session_state.nama_val, 'nip': st.session_state.nip_val,
-            'prov': st.session_state.prov_val, 'kab': st.session_state.kab_val, 'kec': st.session_state.kec_val, 'kel': st.session_state.kel_val,
-            'tgl': st.session_state.tgl_val, 'judul': jk
-        }
-        loc = f"Desa {meta['kel']}, Kec. {meta['kec']}, {meta['kab']}"
-        kop = st.session_state.kop_bytes; ttd = st.session_state.ttd_bytes
-
-        def phot_man(suf):
-            st.write("#### 📸 Dokumentasi")
-            up = st.file_uploader("Upload Foto", type=['jpg','png'], accept_multiple_files=True, key=f"u_{suf}")
-            sel=[io.BytesIO(f.getvalue()) for f in up] if up else []
-            return sel, up
-
-        if "RHK 3" in cr:
-            st.info("ℹ️ RHK 3: Pakai Excel.")
-            td = pd.DataFrame({"Nama":["A"], "NIK":["123"], "Alamat":["B"], "Kategori":["S"], "Status":["L"], "Jenis Graduasi":["S"], "Tahun Bergabung":["2018"], "Jumlah Anggota":["4"], "Alasan":["M"]})
-            b=io.BytesIO(); td.to_excel(b, index=False); b.seek(0)
-            st.download_button("📥 Template XLSX", b, "template.xlsx")
+        for idx, scene in enumerate(st.session_state['generated_scenes']):
+            audio_p = generate_audio_sync(scene['narration'], voice_gender)
+            img_p = None
             
-            up = st.file_uploader("Upload Excel", type=['xlsx'])
-            if up: st.session_state['graduasi_raw'] = pd.read_excel(up)
+            if st.session_state.get(f"up_{idx}"):
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as f:
+                    f.write(st.session_state[f"up_{idx}"].getbuffer())
+                    img_p = f.name
+            elif idx in st.session_state['ai_images_data']:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as f:
+                    f.write(st.session_state['ai_images_data'][idx])
+                    img_p = f.name
             
-            if st.session_state['graduasi_raw'] is not None:
-                df = st.session_state['graduasi_raw']; 
-                if 'Pilih' not in df.columns: df.insert(0, "Pilih", False)
-                ed = st.data_editor(df, num_rows="dynamic", use_container_width=True)
-                if st.button("💾 Simpan Pilihan"): st.session_state['graduasi_fix'] = ed[ed['Pilih']==True].to_dict('records'); st.success("Disimpan")
-
-            ket = st.text_area("Keterangan:", height=80); ph, nu = phot_man("3")
-            if st.button("🚀 Generate RHK 3", type="primary"):
-                if nu: 
-                    for f in nu: upload_to_drive(f, f"FOTO_{cr}", "image/jpeg") # UPLOAD FOTO RAW KE DRIVE
-                kp = st.session_state.get('graduasi_fix', []); res=[]
-                pr = st.progress(0); stt = st.empty()
-                for i, k in enumerate(kp):
-                    nm = str(k.get('Nama', 'KPM')); stt.info(f"Proses: {nm}..."); time.sleep(3)
-                    dt = generate_isi_laporan(cr, f"Graduasi: {nm}", meta['kpm'], nm, meta['bulan'], loc, ket_info=ket)
-                    if dt:
-                        [p.seek(0) for p in ph]; w_io=io.BytesIO(create_word_doc(dt, meta, ph, kop, ttd, {'desc':ket}, k).getvalue()); w_io.seek(0)
-                        p_io=io.BytesIO(create_pdf_doc(dt, meta, ph, kop, ttd, {'desc':ket}, k)); p_io.seek(0)
-                        
-                        # UPLOAD HASIL KE DRIVE
-                        w_link = upload_to_drive(w_io, f"Laporan_{nm}.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-                        p_link = upload_to_drive(p_io, f"Laporan_{nm}.pdf", "application/pdf")
-                        
-                        res.append({'nama': nm, 'word': w_io.getvalue(), 'pdf': p_io.getvalue(), 'link': w_link})
-                    pr.progress((i+1)/len(kp))
-                st.session_state['rhk3_results'] = res; st.success("Selesai!"); st.rerun()
+            if img_p: last_valid_img = img_p
+            elif last_valid_img: img_p = last_valid_img
             
-            if st.session_state.get('rhk3_results'):
-                for i, r in enumerate(st.session_state['rhk3_results']):
-                    c1,c2,c3=st.columns([3,1,1]); c1.write(f"📄 **{r['nama']}**")
-                    c2.download_button("Word", r['word'], f"{r['nama']}.docx", key=f"w{i}")
-                    c3.download_button("PDF", r['pdf'], f"{r['nama']}.pdf", key=f"p{i}")
-                    if r.get('link'): st.caption(f"🔗 [Lihat di Drive]({r['link']})")
-
-        elif cr in ["RHK 2 – LAPORAN P2K2 (FDS)", "RHK 4 – KEGIATAN PEMUTAKHIRAN", "RHK 7 – LAPORAN DIREKTIF"]:
-            qk = 'rhk2_queue' if "RHK 2" in cr else 'rhk4_queue' if "RHK 4" in cr else 'rhk7_queue'
-            rk = 'rhk2_results' if "RHK 2" in cr else 'rhk4_results' if "RHK 4" in cr else 'rhk7_results'
+            if audio_p and img_p:
+                final_assets.append({"image": img_p, "audio": audio_p})
+            progress_bar.progress((idx+1)/len(st.session_state['generated_scenes']))
             
-            with st.container(border=True):
-                st.write("#### ➕ Antrian")
-                md = st.text_input("Kegiatan:") if "RHK 7" in cr else st.selectbox("Modul:", CONFIG_LAPORAN[cr])
-                ap = st.selectbox("App:", ["SIKS-NG", "ESDM", "SIKMA"]) if "RHK 4" in cr else ""
-                kt = st.text_area("Ket:", height=80); ph, nu = phot_man("q")
-                if st.button("Masuk Antrian"):
-                    if not ph: st.error("Foto Wajib!")
-                    else:
-                        if nu: 
-                            for f in nu: upload_to_drive(f, f"FOTO_{cr}", "image/jpeg")
-                        st.session_state[qk].append({"modul": md, "foto": ph, "foto_count": len(ph), "app": ap, "desc": kt})
-                        st.success("Masuk!"); time.sleep(0.5); st.rerun()
-            
-            q = st.session_state[qk]
-            if q:
-                st.write(f"### 📋 List ({len(q)})"); 
-                for i,x in enumerate(q): st.write(f"{i+1}. {x['modul']} ({x['foto_count']} Foto)")
-                if st.button("Hapus Semua"): st.session_state[qk]=[]; st.rerun()
-                if st.button("🚀 Generate Semua", type="primary"):
-                    res=[]; pr=st.progress(0); stt=st.empty()
-                    for i, it in enumerate(q):
-                        nm=it['modul']; stt.info(f"Proses: {nm}..."); time.sleep(3)
-                        d = generate_isi_laporan(cr, nm, meta['kpm'], "Peserta", meta['bulan'], loc, "", it.get('app'), it.get('desc'))
-                        if d:
-                            [p.seek(0) for p in it['foto']]
-                            w_io = io.BytesIO(create_word_doc(d, meta, it['foto'], kop, ttd, {'desc':it.get('desc')}).getvalue()); w_io.seek(0)
-                            p_io = io.BytesIO(create_pdf_doc(d, meta, it['foto'], kop, ttd, {'desc':it.get('desc')})); p_io.seek(0)
-                            
-                            w_link = upload_to_drive(w_io, f"{nm}.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-                            p_link = upload_to_drive(p_io, f"{nm}.pdf", "application/pdf")
-                            
-                            res.append({'nama': nm, 'word': w_io.getvalue(), 'pdf': p_io.getvalue(), 'link': w_link})
-                        pr.progress((i+1)/len(q))
-                    st.session_state[rk]=res; st.success("Selesai!"); st.rerun()
-            
-            rs = st.session_state.get(rk)
-            if rs:
-                for i, r in enumerate(rs):
-                    c1,c2,c3=st.columns([3,1,1]); c1.write(f"📘 **{r['nama']}**")
-                    c2.download_button("Word", r['word'], f"{r['nama']}.docx", key=f"wq{i}")
-                    c3.download_button("PDF", r['pdf'], f"{r['nama']}.pdf", key=f"pq{i}")
-                    if r.get('link'): st.caption(f"🔗 [Lihat di Drive]({r['link']})")
-
-        else: # RHK 1, 5, 6
-            sub = CONFIG_LAPORAN[cr]
-            jk = sub[0] if len(sub)==1 else st.text_input("Kegiatan:", value=sub[0])
-            kt = st.text_area("Ket:", height=80); ph, nu = phot_man("s")
-            
-            if st.button("🚀 Generate Laporan", type="primary"):
-                if nu: 
-                    for f in nu: upload_to_drive(f, f"FOTO_{cr}", "image/jpeg")
-                with st.status("Proses...", expanded=True) as s:
-                    st.write("Analisis..."); time.sleep(2); st.write("AI Generating...")
-                    d = generate_isi_laporan(cr, jk, meta['kpm'], "Peserta", meta['bulan'], loc, ket_info=kt)
-                    if d:
-                        st.write("Menyusun & Upload...")
-                        [p.seek(0) for p in ph]; w_io=io.BytesIO(create_word_doc(d, meta, ph, kop, ttd, {'desc':kt}).getvalue()); w_io.seek(0)
-                        [p.seek(0) for p in ph]; p_io=io.BytesIO(create_pdf_doc(d, meta, ph, kop, ttd, {'desc':kt})); p_io.seek(0)
-                        
-                        w_link = upload_to_drive(w_io, f"{cr}.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-                        p_link = upload_to_drive(p_io, f"{cr}.pdf", "application/pdf")
-                        
-                        st.session_state['generated_file_data']={'name':cr, 'word':w_io.getvalue(), 'pdf':p_io.getvalue(), 'link': w_link}
-                        simpan_riwayat(cr, "Gen", meta['kel']); s.update(label="Selesai!", state="complete", expanded=False)
-                    else: s.update(label="Gagal", state="error")
-
-            f = st.session_state.get('generated_file_data')
-            if f:
-                c1,c2=st.columns(2)
-                c1.download_button("Word", f['word'], f"{f['name']}.docx")
-                c2.download_button("PDF", f['pdf'], f"{f['name']}.pdf")
-                if f.get('link'): st.success(f"✅ File tersimpan di Google Drive! [Klik untuk buka]({f['link']})")
-
-    render_sidebar()
-    if st.session_state['page'] == 'home': show_dashboard()
-    elif st.session_state['page'] == 'detail': show_detail()
+        if final_assets:
+            result_path = create_final_video(final_assets)
+            if result_path:
+                st.session_state['final_video_path'] = result_path
+                st.balloons()
+            else:
+                st.error("Gagal render.")
+    
+    if st.session_state['final_video_path'] and os.path.exists(st.session_state['final_video_path']):
+        st.success("✅ Video Siap!")
+        st.video(st.session_state['final_video_path'])
+        with open(st.session_state['final_video_path'], "rb") as f:
+            st.download_button("⬇️ Download Video MP4", data=f, file_name="ai_story_video.mp4", mime="video/mp4")
